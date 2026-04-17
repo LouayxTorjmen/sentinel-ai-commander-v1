@@ -126,6 +126,8 @@ services:
     ports: ["127.0.0.1:${PORT_AI_AGENTS:-50010}:8000"]
     environment:
       - GROQ_API_KEY=${GROQ_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
       - LLM_MODEL=${LLM_MODEL:-llama-3.3-70b-versatile}
       - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0}
       - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
