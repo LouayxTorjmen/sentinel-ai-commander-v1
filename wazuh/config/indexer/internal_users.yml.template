@@ -1,0 +1,16 @@
+---
+_meta:
+  type: "internalusers"
+  config_version: 2
+
+admin:
+  hash: "${WAZUH_INDEXER_HASH_ADMIN}"
+  reserved: true
+  backend_roles:
+    - "admin"
+  description: "Admin user"
+
+kibanaserver:
+  hash: "${WAZUH_INDEXER_HASH_KIBANA}"
+  reserved: true
+  description: "Wazuh dashboard user"

@@ -1,0 +1,33 @@
+---
+- name: SENTINEL-AI — Brute Force Response
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Validate source IP
+      ansible.builtin.fail:
+        msg: "source_ip is required for brute force response"
+      when: source_ip == ""
+
+  roles:
+    - role: collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+        evidence_target_ip: "{{ source_ip }}"
+        collect_memory: false
+
+    - role: block_ip
+      vars:
+        block_ip_address: "{{ source_ip }}"
+        block_ip_comment: "SENTINEL-AI: Brute force attack — incident {{ incident_id }}"
+        block_duration_seconds: 3600
+
+    - role: notify_soc
+      vars:
+        notify_subject: "Brute Force Attack Blocked"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"
+        notify_message: |
+          Automated brute force response executed.
+          Source IP {{ source_ip }} has been blocked for 1 hour.
+          Evidence collected under incident {{ incident_id }}.

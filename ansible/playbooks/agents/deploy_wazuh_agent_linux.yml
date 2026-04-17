@@ -1,0 +1,92 @@
+---
+# =============================================================================
+#  Deploy Wazuh Agent to Linux Victim Hosts
+#  Targets: victim1 (web server), victim2 (database server)
+#  Both Ubuntu 22.04 LTS — best Wazuh support for FIM, rootcheck, SCA, vuln-det
+# =============================================================================
+- name: "SENTINEL-AI — Deploy Wazuh Agent (Linux)"
+  hosts: linux_victims
+  become: true
+  gather_facts: true
+
+  vars:
+    wazuh_version: "4.14.4"
+    wazuh_manager_address: "{{ wazuh_manager_ip }}"
+    wazuh_agent_port: "{{ wazuh_manager_port | default('50041') }}"
+    wazuh_enrollment_port: "{{ wazuh_enrollment_port | default('50042') }}"
+    wazuh_agent_groups: "linux,default"
+
+  tasks:
+
+    - name: "Install prerequisites"
+      apt:
+        name: [curl, apt-transport-https, lsb-release, gnupg2]
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: "Add Wazuh GPG key"
+      shell: |
+        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
+      args:
+        creates: /usr/share/keyrings/wazuh.gpg
+
+    - name: "Add Wazuh repository"
+      copy:
+        content: |
+          deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main
+        dest: /etc/apt/sources.list.d/wazuh.list
+        mode: "0644"
+
+    - name: "Install Wazuh agent"
+      apt:
+        name: "wazuh-agent={{ wazuh_version }}-1"
+        state: present
+        update_cache: yes
+      environment:
+        WAZUH_MANAGER: "{{ wazuh_manager_address }}"
+        WAZUH_MANAGER_PORT: "{{ wazuh_agent_port }}"
+        WAZUH_REGISTRATION_SERVER: "{{ wazuh_manager_address }}"
+        WAZUH_REGISTRATION_PORT: "{{ wazuh_enrollment_port }}"
+        WAZUH_AGENT_GROUP: "{{ wazuh_agent_groups }}"
+        WAZUH_AGENT_NAME: "{{ inventory_hostname }}"
+
+    - name: "Configure ossec.conf — manager address and ports"
+      template:
+        src: ../templates/ossec_agent.conf.j2
+        dest: /var/ossec/etc/ossec.conf
+        mode: "0640"
+        owner: root
+        group: wazuh
+
+    - name: "Enable FIM for critical directories"
+      blockinfile:
+        path: /var/ossec/etc/ossec.conf
+        insertbefore: "</ossec_config>"
+        marker: "<!-- {mark} SENTINEL CUSTOM FIM -->"
+        block: |
+          <syscheck>
+            <directories realtime="yes" check_all="yes">/etc,/usr/bin,/usr/sbin,/var/www</directories>
+            <directories realtime="yes" check_all="yes">/home,/root/.ssh</directories>
+            <frequency>300</frequency>
+          </syscheck>
+
+    - name: "Enable and start Wazuh agent"
+      systemd:
+        name: wazuh-agent
+        enabled: yes
+        state: restarted
+        daemon_reload: yes
+
+    - name: "Wait for agent to register"
+      wait_for:
+        timeout: 30
+
+    - name: "Verify agent is running"
+      command: /var/ossec/bin/wazuh-control status
+      register: agent_status
+      changed_when: false
+
+    - name: "Report agent status"
+      debug:
+        msg: "Wazuh agent on {{ inventory_hostname }}: {{ agent_status.stdout }}"

@@ -1,0 +1,60 @@
+---
+- name: "Block Malicious IP — Incident Response"
+  hosts: wazuh_agents:suricata_sensors
+  become: true
+  gather_facts: false
+
+  vars:
+    malicious_ip: "{{ malicious_ip | mandatory }}"
+    block_duration: "{{ block_duration | default(3600) | int }}"
+    incident_id: "{{ incident_id | default('UNKNOWN') }}"
+    triggered_by_rule: "{{ triggered_by_rule | default('AI Correlation') }}"
+
+  tasks:
+
+    - name: "Validate IP address format"
+      assert:
+        that:
+          - malicious_ip | ansible.utils.ipaddr
+        fail_msg: "{{ malicious_ip }} is not a valid IP address"
+      delegate_to: localhost
+
+    - name: "Block IP with iptables (INPUT chain)"
+      iptables:
+        chain: INPUT
+        source: "{{ malicious_ip }}"
+        jump: DROP
+        comment: "SecOps AI: {{ incident_id }} — {{ triggered_by_rule }}"
+        state: present
+
+    - name: "Block IP with iptables (FORWARD chain)"
+      iptables:
+        chain: FORWARD
+        source: "{{ malicious_ip }}"
+        jump: DROP
+        comment: "SecOps AI: {{ incident_id }}"
+        state: present
+
+    - name: "Save iptables rules (Ubuntu/Debian)"
+      command: iptables-save
+      changed_when: true
+      when: ansible_os_family == "Debian"
+
+    - name: "Log block action to syslog"
+      command: >
+        logger -t secops-ansible
+        "INCIDENT={{ incident_id }} ACTION=block_ip IP={{ malicious_ip }}
+        RULE={{ triggered_by_rule }} DURATION={{ block_duration }}s"
+
+    - name: "Schedule IP unblock"
+      shell: |
+        echo "iptables -D INPUT -s {{ malicious_ip }} -j DROP 2>/dev/null || true;
+              iptables -D FORWARD -s {{ malicious_ip }} -j DROP 2>/dev/null || true"         | at now + {{ (block_duration / 60) | int }} minutes
+      when: block_duration | int > 0
+      ignore_errors: true
+
+    - name: "Report result"
+      debug:
+        msg: >
+          IP {{ malicious_ip }} BLOCKED on {{ inventory_hostname }}
+          (incident={{ incident_id }}, auto-unblock in {{ block_duration }}s)

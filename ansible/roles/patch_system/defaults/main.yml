@@ -1,0 +1,5 @@
+---
+patch_cve_id: ""
+patch_packages: []
+patch_reboot_if_needed: false
+dry_run: false

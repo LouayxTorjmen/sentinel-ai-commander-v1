@@ -1,0 +1,4 @@
+---
+restore_file_path: ""
+baseline_dir: "/var/lib/sentinel-ai/baselines"
+dry_run: false

@@ -1,0 +1,14 @@
+hosts:
+  - default:
+      url: https://wazuh.manager
+      port: 55000
+      username: wazuh-wui
+      password: ${WAZUH_INDEXER_PASSWORD}
+      run_as: false
+hosts:
+  - 1513629884013:
+      url: https://wazuh.manager
+      port: 55000
+      username: wazuh-wui
+      password: ${WAZUH_INDEXER_PASSWORD}
+      run_as: true

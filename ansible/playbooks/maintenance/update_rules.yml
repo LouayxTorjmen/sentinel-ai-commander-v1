@@ -1,0 +1,47 @@
+---
+# =============================================================================
+#  update_rules.yml — Update Wazuh and Suricata Detection Rules
+#  Location: ansible/playbooks/maintenance/update_rules.yml
+#
+#  PURPOSE: Deploy updated custom rules to the Wazuh Manager and
+#  signal Suricata to reload its ruleset.
+#
+#  Run on a schedule (e.g. daily cron) or when new MITRE/CVE rules are added.
+#
+#  PREREQUISITES:
+#    • Wazuh Manager container: sentinel-wazuh-manager must be running
+#    • Suricata container: sentinel-suricata must be running
+# =============================================================================
+
+- name: "Update Wazuh Custom Detection Rules"
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: "Copy updated local_rules.xml to Wazuh Manager container"
+      command: >
+        docker cp
+        {{ playbook_dir }}/../../../wazuh/manager/local_rules.xml
+        sentinel-wazuh-manager:/var/ossec/etc/rules/local_rules.xml
+
+    - name: "Copy updated local_decoders.xml to Wazuh Manager container"
+      command: >
+        docker cp
+        {{ playbook_dir }}/../../../wazuh/manager/local_decoder.xml
+        sentinel-wazuh-manager:/var/ossec/etc/decoders/local_decoders.xml
+
+    - name: "Reload Wazuh Manager rules (hot reload — no restart needed)"
+      command: >
+        docker exec sentinel-wazuh-manager
+        /var/ossec/bin/ossec-control reload
+
+    - name: "Trigger Suricata rule reload (SIGUSR2)"
+      command: >
+        docker exec sentinel-suricata
+        kill -USR2 1
+      ignore_errors: true
+
+    - name: "Report update complete"
+      debug:
+        msg: "Wazuh rules and Suricata rules updated and hot-reloaded."

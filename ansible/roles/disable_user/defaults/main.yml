@@ -1,0 +1,6 @@
+---
+disable_username: ""
+kill_sessions: true
+revoke_sudo: true
+clear_authorized_keys: true
+dry_run: false

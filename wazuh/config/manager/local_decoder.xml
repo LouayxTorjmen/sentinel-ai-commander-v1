@@ -1,0 +1,7 @@
+<!-- SENTINEL-AI Custom Decoders -->
+
+<!-- Suricata eve.json fields extraction -->
+<decoder name="suricata-eve">
+  <prematch>^{"timestamp"</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

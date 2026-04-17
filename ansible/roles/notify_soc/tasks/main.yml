@@ -1,0 +1,22 @@
+---
+- name: Log notification locally
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | NOTIFY | [{{ notify_severity | upper }}] {{ notify_subject }} | incident={{ notify_incident_id }} | {{ notify_message }}"
+    create: yes
+
+- name: POST to webhook if configured
+  ansible.builtin.uri:
+    url: "{{ notify_webhook_url }}"
+    method: POST
+    body_format: json
+    body:
+      incident_id: "{{ notify_incident_id }}"
+      subject: "{{ notify_subject }}"
+      severity: "{{ notify_severity }}"
+      message: "{{ notify_message }}"
+      host: "{{ ansible_hostname }}"
+      timestamp: "{{ ansible_date_time.iso8601 }}"
+    status_code: [200, 201, 202, 204]
+  when: notify_webhook_url != ""
+  ignore_errors: true

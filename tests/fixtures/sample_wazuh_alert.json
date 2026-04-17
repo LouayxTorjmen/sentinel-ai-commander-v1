@@ -1,0 +1,40 @@
+{
+  "id": "1701234567.123456",
+  "timestamp": "2024-11-29T14:32:10.123+0000",
+  "rule": {
+    "id": 100010,
+    "level": 10,
+    "description": "Sentinel: SSH brute force attack",
+    "groups": [
+      "authentication_failures",
+      "brute_force",
+      "attack"
+    ],
+    "mitre": {
+      "technique": [
+        "T1110",
+        "T1110.001"
+      ],
+      "tactic": [
+        "credential-access"
+      ]
+    }
+  },
+  "agent": {
+    "id": "001",
+    "name": "ubuntu-server-01",
+    "ip": "172.25.0.50"
+  },
+  "manager": {
+    "name": "sentinel-wazuh-manager"
+  },
+  "data": {
+    "srcip": "203.0.113.42",
+    "dstip": "172.25.0.50",
+    "srcport": "54321",
+    "dstport": "22",
+    "protocol": "tcp"
+  },
+  "location": "/var/log/auth.log",
+  "full_log": "Nov 29 14:32:10 ubuntu-server-01 sshd[1234]: Failed password for root from 203.0.113.42 port 54321 ssh2"
+}

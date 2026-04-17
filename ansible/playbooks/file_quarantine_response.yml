@@ -1,0 +1,27 @@
+---
+- name: SENTINEL-AI — File Quarantine Response
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Require file_path
+      ansible.builtin.fail:
+        msg: "file_path is required for quarantine"
+      when: file_path == ""
+
+  roles:
+    - role: collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+        collect_memory: false
+
+    - role: quarantine_file
+      vars:
+        quarantine_file_path: "{{ file_path }}"
+        quarantine_reason: "Incident {{ incident_id }} ({{ severity }})"
+
+    - role: notify_soc
+      vars:
+        notify_subject: "File quarantined: {{ file_path }}"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"

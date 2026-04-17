@@ -1,0 +1,5 @@
+---
+quarantine_file_path: ""
+quarantine_dir: "/var/quarantine"
+quarantine_reason: "SENTINEL-AI quarantine"
+dry_run: false

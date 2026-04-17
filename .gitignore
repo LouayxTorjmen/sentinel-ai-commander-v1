@@ -1,0 +1,104 @@
+# ═══════════════════════════════════════════════════════════════════════
+# SENTINEL-AI — .gitignore
+# ═══════════════════════════════════════════════════════════════════════
+
+# ─── Secrets (CRITICAL — never commit) ──────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# SSH keys generated per-install
+ansible/keys/id_rsa
+ansible/keys/id_rsa.pub
+ansible/keys/*.pub
+
+# TLS certs (regenerated per-install)
+wazuh/config/certs/*.pem
+wazuh/config/certs/*.key
+docker/nginx/certs/*.crt
+docker/nginx/certs/*.key
+
+# ─── Runtime state / logs ───────────────────────────────────────────────
+*.log
+logs/
+ossec.log
+alerts.log
+archives.log
+*.out
+*.err
+
+# Ansible runtime
+ansible/artifacts/
+ansible/env/extravars
+ansible/.ansible_fact_cache/
+ansible/*.retry
+
+# Wazuh runtime
+wazuh/data/
+wazuh/queue/
+wazuh/logs/
+wazuh/config/manager/*.broken
+wazuh/config/manager/*.bak*
+
+# ─── Build / Python artifacts ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+
+# Patch scripts (temporary/dev-only)
+patch.py
+patch_gemini.py
+patch_register.py
+fix_*.py
+auto_discovery_patch.py
+
+# Backup files
+*.bak
+*.backup
+*.broken
+*.orig
+*.wazuh-only.bak
+
+# ─── IDE / OS ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─── Docker state ───────────────────────────────────────────────────────
+volumes/
+data/
+ml-models/
+
+# ─── Database state ─────────────────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db
+
+# Generated inventory (per-env)
+ansible/inventory/hosts.ini
+
+# ─── Misc generated files ───────────────────────────────────────────────
+/tmp/
+node_modules/
+
+# Rendered config files (generated from .template by setup.sh)
+wazuh/config/filebeat.yml
+wazuh/config/dashboard/opensearch_dashboards.yml
+wazuh/config/dashboard/wazuh.yml
+wazuh/config/indexer/internal_users.yml

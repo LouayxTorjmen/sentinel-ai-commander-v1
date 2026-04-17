@@ -1,0 +1,191 @@
+# =============================================================================
+#  SENTINEL-AI COMMANDER — Unified Stack (backward compatible)
+#  For independent stacks use: docker-compose.{infra,suricata,ai}.yml
+#  Wazuh is always separate: wazuh/docker-compose.yml
+# =============================================================================
+name: sentinel
+
+networks:
+  sentinel_internal:
+    driver: bridge
+    name: sentinel_internal
+  wazuh_api_bridge:
+    external: true
+    name: sentinel_wazuh_api_bridge
+  wazuh_indexer_bridge:
+    external: true
+    name: sentinel_wazuh_indexer_bridge
+
+volumes:
+  postgres-data:
+    name: sentinel_postgres_data
+  redis-data:
+    name: sentinel_redis_data
+  suricata-logs:
+    name: sentinel_suricata_logs
+  ollama-models:
+    name: sentinel_ollama_models
+  ml-models:
+    name: sentinel_ml_models
+
+services:
+  suricata:
+    build: { context: ./docker/suricata, dockerfile: Dockerfile }
+    container_name: sentinel-suricata
+    hostname: sentinel-suricata
+    restart: always
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
+    environment: ["SURICATA_INTERFACE=${SURICATA_INTERFACE:-}"]
+    volumes:
+      - suricata-logs:/var/log/suricata
+      - ./suricata/rules/custom:/custom-rules:ro
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentinel-postgres
+    hostname: sentinel-postgres
+    restart: always
+    networks: [sentinel_internal]
+    ports: ["127.0.0.1:${PORT_POSTGRES:-50031}:5432"]
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-sentinel}
+      - POSTGRES_USER=${POSTGRES_USER:-sentinel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel} -d ${POSTGRES_DB:-sentinel}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: sentinel-redis
+    hostname: sentinel-redis
+    restart: always
+    networks: [sentinel_internal]
+    ports: ["127.0.0.1:${PORT_REDIS:-50030}:6379"]
+    volumes: [redis-data:/data]
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  nginx:
+    build: { context: ./docker/nginx, dockerfile: Dockerfile }
+    container_name: sentinel-nginx
+    hostname: sentinel-nginx
+    restart: always
+    networks: [sentinel_internal, wazuh_api_bridge]
+    ports:
+      - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_NGINX_HTTP:-50020}:80"
+      - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_NGINX_HTTPS:-50021}:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/certs:/etc/nginx/certs:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      redis: { condition: service_healthy }
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sentinel-ollama
+    hostname: sentinel-ollama
+    restart: always
+    networks: [sentinel_internal]
+    ports: ["127.0.0.1:${PORT_OLLAMA:-50060}:11434"]
+    volumes: [ollama-models:/root/.ollama]
+    environment: ["OLLAMA_HOST=0.0.0.0"]
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    healthcheck:
+      test: ["CMD-SHELL", "pidof ollama || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  ai-agents:
+    build: { context: ., dockerfile: docker/ai-agents/Dockerfile }
+    container_name: sentinel-ai-agents
+    hostname: sentinel-ai-agents
+    restart: always
+    networks: [sentinel_internal, wazuh_api_bridge, wazuh_indexer_bridge]
+    ports: ["127.0.0.1:${PORT_AI_AGENTS:-50010}:8000"]
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-llama-3.3-70b-versatile}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
+      - OLLAMA_BASE_URL=http://sentinel-ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+      - LLM_FALLBACK_ENABLED=${LLM_FALLBACK_ENABLED:-true}
+      - WAZUH_API_URL=https://sentinel-wazuh-manager:55000
+      - WAZUH_API_USER=${WAZUH_API_USER:-wazuh-wui}
+      - WAZUH_API_PASSWORD=${WAZUH_API_PASSWORD}
+      - WAZUH_SSL_VERIFY=false
+      - WAZUH_MANAGER_HOST=sentinel-wazuh-manager
+      - WAZUH_INDEXER_HOST=sentinel-wazuh-indexer
+      - WAZUH_INDEXER_PORT=9200
+      - WAZUH_INDEXER_USER=${WAZUH_INDEXER_USER:-admin}
+      - WAZUH_INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      - REDIS_HOST=sentinel-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - POSTGRES_HOST=sentinel-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-sentinel}
+      - POSTGRES_USER=${POSTGRES_USER:-sentinel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - ANSIBLE_RUNNER_HOST=sentinel-ansible-runner
+      - ANSIBLE_RUNNER_PORT=5001
+      - ANSIBLE_CONFIDENCE_THRESHOLD=${ANSIBLE_CONFIDENCE_THRESHOLD:-0.85}
+      - NVD_API_KEY=${NVD_API_KEY:-}
+      - ML_MODELS_PATH=/models
+      - ML_ANOMALY_CONTAMINATION=${ML_ANOMALY_CONTAMINATION:-0.05}
+      - DISCOVERY_ENABLED=${DISCOVERY_ENABLED:-true}
+      - DISCOVERY_INTERVAL_SECONDS=${DISCOVERY_INTERVAL_SECONDS:-300}
+      - DISCOVERY_NETWORKS=${DISCOVERY_NETWORKS:-192.168.49.0/24}
+      - DISCOVERY_AUTO_ENROLL=${DISCOVERY_AUTO_ENROLL:-true}
+      - DISCOVERY_SSH_KEY=${DISCOVERY_SSH_KEY:-/ansible/keys/id_rsa}
+      - DISCOVERY_SSH_USER=${DISCOVERY_SSH_USER:-root}
+      - DISCOVERY_EXCLUDE_IPS=${DISCOVERY_EXCLUDE_IPS:-}
+      - WAZUH_MANAGER_EXTERNAL_IP=${WAZUH_MANAGER_EXTERNAL_IP:-}
+      - PFSENSE_SYSLOG_RELAY_IP=${PFSENSE_SYSLOG_RELAY_IP:-192.168.49.128}
+      - WAZUH_ENROLLMENT_PORT=${PORT_WAZUH_AGENT_ENROLL:-50042}
+      - WAZUH_AGENT_COMM_PORT=${PORT_WAZUH_AGENT_COMM_TCP:-50041}
+      - PFSENSE_PASSWORD=${PFSENSE_PASSWORD:-}
+      - WAZUH_MANAGER_CONTAINER=${WAZUH_MANAGER_CONTAINER:-sentinel-wazuh-manager}
+    volumes:
+      - suricata-logs:/var/log/suricata:ro
+      - ml-models:/models
+      - /root/sentinel-ai-commander/ansible:/ansible
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+
+  ansible-runner:
+    build: { context: ./docker/ansible-runner, dockerfile: Dockerfile }
+    container_name: sentinel-ansible-runner
+    hostname: sentinel-ansible-runner
+    restart: always
+    networks: [sentinel_internal, wazuh_api_bridge]
+    ports: ["127.0.0.1:${PORT_ANSIBLE_RUNNER:-50011}:5001"]
+    environment:
+      - ANSIBLE_RUNNER_PORT=5001
+      - ANSIBLE_BASE=/ansible
+      - RUNNER_BASE=/ansible
+    volumes: [/root/sentinel-ai-commander/ansible:/ansible]

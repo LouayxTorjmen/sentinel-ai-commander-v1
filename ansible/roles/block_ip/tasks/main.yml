@@ -1,0 +1,49 @@
+---
+- name: Validate IP provided
+  ansible.builtin.fail:
+    msg: "block_ip_address is required"
+  when: block_ip_address == ""
+
+- name: Ensure SENTINEL chain exists
+  ansible.builtin.shell: |
+    iptables -N {{ block_chain }} 2>/dev/null || true
+    iptables -C INPUT -j {{ block_chain }} 2>/dev/null || iptables -I INPUT -j {{ block_chain }}
+  changed_when: false
+  when: not dry_run | bool
+
+- name: Block IP with comment
+  ansible.builtin.iptables:
+    chain: "{{ block_chain }}"
+    source: "{{ block_ip_address }}"
+    jump: DROP
+    comment: "{{ block_ip_comment }} | duration={{ block_duration_seconds }}s"
+    state: present
+  when: not dry_run | bool
+
+- name: Save iptables rules (Debian/Ubuntu)
+  ansible.builtin.shell: iptables-save > /etc/iptables/rules.v4
+  when:
+    - not dry_run | bool
+    - ansible_os_family == "Debian"
+  ignore_errors: true
+
+- name: Save iptables rules (RHEL)
+  ansible.builtin.shell: service iptables save 2>/dev/null || iptables-save > /etc/sysconfig/iptables
+  when:
+    - not dry_run | bool
+    - ansible_os_family == "RedHat"
+  ignore_errors: true
+
+- name: Schedule unblock (at command)
+  ansible.builtin.shell: |
+    echo "iptables -D {{ block_chain }} -s {{ block_ip_address }} -j DROP" | at now + {{ (block_duration_seconds | int / 60) | int }} minutes 2>/dev/null || true
+  when:
+    - not dry_run | bool
+    - block_duration_seconds | int > 0
+  ignore_errors: true
+
+- name: Log block action
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | BLOCK_IP | {{ block_ip_address }} | {{ block_ip_comment }}"
+    create: yes

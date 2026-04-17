@@ -1,0 +1,61 @@
+---
+- name: Require file path
+  ansible.builtin.fail:
+    msg: "quarantine_file_path is required"
+  when: quarantine_file_path == ""
+
+- name: Check file exists
+  ansible.builtin.stat:
+    path: "{{ quarantine_file_path }}"
+    get_checksum: yes
+    checksum_algorithm: sha256
+  register: file_info
+
+- name: Skip if file missing
+  ansible.builtin.meta: end_play
+  when: not file_info.stat.exists
+
+- name: Ensure quarantine dir exists
+  ansible.builtin.file:
+    path: "{{ quarantine_dir }}"
+    state: directory
+    mode: '0700'
+    owner: root
+    group: root
+
+- name: Compute quarantine filename
+  ansible.builtin.set_fact:
+    q_name: "{{ quarantine_file_path | basename }}.{{ ansible_date_time.epoch }}.quarantined"
+
+- name: Write metadata sidecar
+  ansible.builtin.copy:
+    content: |
+      quarantined_at: {{ ansible_date_time.iso8601 }}
+      original_path: {{ quarantine_file_path }}
+      sha256: {{ file_info.stat.checksum }}
+      size: {{ file_info.stat.size }}
+      owner: {{ file_info.stat.pw_name }}
+      perms: {{ file_info.stat.mode }}
+      mtime: {{ file_info.stat.mtime }}
+      reason: {{ quarantine_reason }}
+    dest: "{{ quarantine_dir }}/{{ q_name }}.meta"
+    mode: '0600'
+
+- name: Move file to quarantine
+  ansible.builtin.command: >
+    mv "{{ quarantine_file_path }}" "{{ quarantine_dir }}/{{ q_name }}"
+  when: not dry_run | bool
+
+- name: Strip execute permissions on quarantined file
+  ansible.builtin.file:
+    path: "{{ quarantine_dir }}/{{ q_name }}"
+    mode: '0400'
+    owner: root
+    group: root
+  when: not dry_run | bool
+
+- name: Log quarantine
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | QUARANTINE_FILE | {{ quarantine_file_path }} -> {{ quarantine_dir }}/{{ q_name }} | sha256={{ file_info.stat.checksum }}"
+    create: yes

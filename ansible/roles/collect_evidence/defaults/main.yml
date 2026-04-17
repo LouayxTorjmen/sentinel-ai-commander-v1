@@ -1,0 +1,8 @@
+---
+evidence_incident_id: "unknown"
+evidence_target_ip: ""
+collect_network: true
+collect_processes: true
+collect_memory: false
+collect_logs: true
+evidence_dir: "/var/log/sentinel-ai/evidence"

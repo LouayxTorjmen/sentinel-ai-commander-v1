@@ -1,0 +1,26 @@
+---
+- name: SENTINEL-AI — Compromised User Response
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Require username
+      ansible.builtin.fail:
+        msg: "username is required"
+      when: username == ""
+
+  roles:
+    - role: collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+
+    - role: disable_user
+      vars:
+        disable_username: "{{ username }}"
+
+    - role: notify_soc
+      vars:
+        notify_subject: "User disabled: {{ username }}"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"
+        notify_message: "User '{{ username }}' locked on {{ ansible_hostname }}. Sessions killed, sudo revoked, SSH keys cleared."

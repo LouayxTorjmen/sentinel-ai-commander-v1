@@ -1,0 +1,39 @@
+---
+- name: Require file path
+  ansible.builtin.fail:
+    msg: "restore_file_path is required"
+  when: restore_file_path == ""
+
+- name: Compute baseline filename
+  ansible.builtin.set_fact:
+    baseline_file: "{{ baseline_dir }}/{{ restore_file_path | replace('/', '_') }}.baseline"
+
+- name: Check if baseline exists
+  ansible.builtin.stat:
+    path: "{{ baseline_file }}"
+  register: baseline_stat
+
+- name: Fail if no baseline
+  ansible.builtin.fail:
+    msg: "No baseline found at {{ baseline_file }} — cannot restore {{ restore_file_path }}"
+  when: not baseline_stat.stat.exists
+
+- name: Backup current (tampered) version
+  ansible.builtin.copy:
+    src: "{{ restore_file_path }}"
+    dest: "/var/log/sentinel-ai/tampered-{{ restore_file_path | basename }}-{{ ansible_date_time.epoch }}"
+    remote_src: yes
+  when: not dry_run | bool
+
+- name: Restore from baseline
+  ansible.builtin.copy:
+    src: "{{ baseline_file }}"
+    dest: "{{ restore_file_path }}"
+    remote_src: yes
+  when: not dry_run | bool
+
+- name: Log restore
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | RESTORE_FILE | {{ restore_file_path }} restored from {{ baseline_file }}"
+    create: yes

@@ -1,0 +1,5 @@
+---
+# Variables applied to all Wazuh-monitored agents
+wazuh_agent_service: wazuh-agent
+wazuh_manager_address: sentinel-wazuh-manager
+ossec_log_path: /var/ossec/logs/ossec.log

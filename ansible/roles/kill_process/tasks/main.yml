@@ -1,0 +1,56 @@
+---
+- name: Require a target
+  ansible.builtin.fail:
+    msg: "Provide kill_process_name or kill_process_pid"
+  when:
+    - kill_process_name == ""
+    - kill_process_pid == ""
+
+- name: Collect process info before kill
+  ansible.builtin.shell: |
+    mkdir -p /var/log/sentinel-ai/evidence
+    EVFILE=/var/log/sentinel-ai/evidence/proc-{{ kill_process_pid | default(kill_process_name) }}-{{ ansible_date_time.epoch }}.txt
+    {% if kill_process_pid != "" %}
+    if [ -d /proc/{{ kill_process_pid }} ]; then
+        echo "=== cmdline ===" >> $EVFILE
+        cat /proc/{{ kill_process_pid }}/cmdline | tr '\0' ' ' >> $EVFILE
+        echo "" >> $EVFILE
+        echo "=== exe ===" >> $EVFILE
+        ls -la /proc/{{ kill_process_pid }}/exe >> $EVFILE 2>&1
+        echo "=== cwd ===" >> $EVFILE
+        ls -la /proc/{{ kill_process_pid }}/cwd >> $EVFILE 2>&1
+        echo "=== open files ===" >> $EVFILE
+        ls -la /proc/{{ kill_process_pid }}/fd/ >> $EVFILE 2>&1
+        echo "=== network ===" >> $EVFILE
+        ss -tnp 2>/dev/null | grep "pid={{ kill_process_pid }}," >> $EVFILE
+    fi
+    {% else %}
+    ps -eo pid,user,cmd | grep "{{ kill_process_name }}" | grep -v grep >> $EVFILE
+    {% endif %}
+    echo "EVIDENCE_FILE=$EVFILE"
+  when:
+    - collect_before_kill | bool
+    - not dry_run | bool
+  register: evidence_collection
+  changed_when: false
+
+- name: Kill by PID
+  ansible.builtin.shell: "kill -{{ kill_signal }} {{ kill_process_pid }}"
+  when:
+    - kill_process_pid != ""
+    - not dry_run | bool
+  ignore_errors: true
+
+- name: Kill by name
+  ansible.builtin.shell: "pkill -{{ kill_signal }} -f '{{ kill_process_name }}'"
+  when:
+    - kill_process_name != ""
+    - kill_process_pid == ""
+    - not dry_run | bool
+  ignore_errors: true
+
+- name: Log kill action
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | KILL_PROCESS | pid={{ kill_process_pid }} name={{ kill_process_name }} signal={{ kill_signal }}"
+    create: yes

@@ -1,0 +1,6 @@
+---
+notify_subject: "SENTINEL-AI Response"
+notify_severity: "medium"
+notify_incident_id: "unknown"
+notify_message: ""
+notify_webhook_url: ""  # Set via env var SENTINEL_WEBHOOK_URL

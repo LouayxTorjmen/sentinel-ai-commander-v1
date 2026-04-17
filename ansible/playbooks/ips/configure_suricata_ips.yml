@@ -1,0 +1,62 @@
+---
+# =============================================================================
+#  Configure Suricata IPS Mode on Victim Hosts
+#  Switches Suricata from IDS (alert only) to IPS (drop) mode
+# =============================================================================
+- name: "SENTINEL-AI — Configure Suricata IPS"
+  hosts: linux_victims
+  become: true
+  gather_facts: true
+
+  vars:
+    suricata_mode: "ips"
+    suricata_interface: "{{ ansible_default_ipv4.interface | default('eth0') }}"
+
+  tasks:
+
+    - name: "Install Suricata"
+      apt:
+        name: [suricata, suricata-update]
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: "Update Suricata rules"
+      command: suricata-update
+      changed_when: true
+
+    - name: "Copy SENTINEL custom rules"
+      copy:
+        src: ../../../suricata/rules/custom/local.rules
+        dest: /var/lib/suricata/rules/local.rules
+        mode: "0644"
+
+    - name: "Configure Suricata for IPS mode (af-packet inline)"
+      blockinfile:
+        path: /etc/suricata/suricata.yaml
+        insertafter: "af-packet:"
+        marker: "# {mark} SENTINEL IPS CONFIG"
+        block: |
+              - interface: {{ suricata_interface }}
+                cluster-id: 99
+                cluster-type: cluster_flow
+                defrag: yes
+                copy-mode: ips
+                copy-iface: {{ suricata_interface }}
+
+    - name: "Configure nfqueue for inline IPS"
+      shell: |
+        iptables -I FORWARD -j NFQUEUE --queue-num 0
+        iptables -I INPUT -j NFQUEUE --queue-num 0
+        iptables -I OUTPUT -j NFQUEUE --queue-num 0
+      when: suricata_mode == "ips"
+
+    - name: "Enable and restart Suricata"
+      systemd:
+        name: suricata
+        enabled: yes
+        state: restarted
+
+    - name: "Report"
+      debug:
+        msg: "Suricata {{ suricata_mode | upper }} configured on {{ inventory_hostname }} interface {{ suricata_interface }}"

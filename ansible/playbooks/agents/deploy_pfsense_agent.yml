@@ -1,0 +1,85 @@
+---
+# =============================================================================
+#  Deploy Wazuh Agent to pfSense Firewall
+#  pfSense uses FreeBSD — requires pkg-based installation
+# =============================================================================
+- name: "SENTINEL-AI — Deploy Wazuh Agent (pfSense)"
+  hosts: pfsense
+  become: true
+  gather_facts: true
+
+  vars:
+    wazuh_manager_address: "{{ wazuh_manager_ip }}"
+    wazuh_agent_port: "{{ wazuh_manager_port | default('50041') }}"
+    wazuh_enrollment_port: "{{ wazuh_enrollment_port | default('50042') }}"
+
+  tasks:
+
+    - name: "Install Wazuh agent via pkg"
+      command: pkg install -y wazuh-agent
+      register: install_result
+      changed_when: "'Installed' in install_result.stdout"
+      failed_when: false
+
+    - name: "Fallback — download Wazuh agent manually"
+      shell: |
+        cd /tmp
+        fetch https://packages.wazuh.com/4.x/freebsd/wazuh-agent-4.14.4.pkg
+        pkg install -y /tmp/wazuh-agent-4.14.4.pkg
+      when: install_result.rc != 0
+      failed_when: false
+
+    - name: "Configure ossec.conf for pfSense"
+      copy:
+        content: |
+          <ossec_config>
+            <client>
+              <server>
+                <address>{{ wazuh_manager_address }}</address>
+                <port>{{ wazuh_agent_port }}</port>
+                <protocol>tcp</protocol>
+              </server>
+              <enrollment>
+                <enabled>yes</enabled>
+                <manager_address>{{ wazuh_manager_address }}</manager_address>
+                <port>{{ wazuh_enrollment_port }}</port>
+                <agent_name>pfsense-fw</agent_name>
+                <groups>firewall,pfsense</groups>
+              </enrollment>
+            </client>
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/filter.log</location>
+            </localfile>
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/system.log</location>
+            </localfile>
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/openvpn.log</location>
+            </localfile>
+            <syscheck>
+              <directories check_all="yes">/etc,/usr/local/etc</directories>
+              <directories check_all="yes">/cf/conf</directories>
+              <frequency>600</frequency>
+            </syscheck>
+          </ossec_config>
+        dest: /var/ossec/etc/ossec.conf
+        mode: "0640"
+
+    - name: "Enable and start Wazuh agent"
+      service:
+        name: wazuh-agent
+        enabled: yes
+        state: restarted
+
+    - name: "Verify agent"
+      command: /var/ossec/bin/wazuh-control status
+      register: status
+      changed_when: false
+      failed_when: false
+
+    - name: "Report"
+      debug:
+        msg: "pfSense Wazuh agent: {{ status.stdout | default('check manually') }}"

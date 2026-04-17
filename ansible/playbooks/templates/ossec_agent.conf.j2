@@ -1,0 +1,58 @@
+<ossec_config>
+  <client>
+    <server>
+      <address>{{ wazuh_manager_address }}</address>
+      <port>{{ wazuh_agent_port }}</port>
+      <protocol>tcp</protocol>
+    </server>
+    <enrollment>
+      <enabled>yes</enabled>
+      <manager_address>{{ wazuh_manager_address }}</manager_address>
+      <port>{{ wazuh_enrollment_port }}</port>
+      <agent_name>{{ inventory_hostname }}</agent_name>
+      <groups>{{ wazuh_agent_groups }}</groups>
+    </enrollment>
+  </client>
+
+  <logging>
+    <log_format>plain</log_format>
+  </logging>
+
+  <rootcheck>
+    <disabled>no</disabled>
+    <frequency>43200</frequency>
+  </rootcheck>
+
+  <wodle name="syscollector">
+    <disabled>no</disabled>
+    <interval>1h</interval>
+    <scan_on_start>yes</scan_on_start>
+    <hardware>yes</hardware>
+    <os>yes</os>
+    <network>yes</network>
+    <packages>yes</packages>
+    <ports all="no">yes</ports>
+    <processes>yes</processes>
+  </wodle>
+
+  <wodle name="vulnerability-detector">
+    <enabled>yes</enabled>
+    <interval>5m</interval>
+    <run_on_start>yes</run_on_start>
+  </wodle>
+
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/auth.log</location>
+  </localfile>
+
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/syslog</location>
+  </localfile>
+
+  <localfile>
+    <log_format>audit</log_format>
+    <location>/var/log/audit/audit.log</location>
+  </localfile>
+</ossec_config>

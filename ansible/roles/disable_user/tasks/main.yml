@@ -1,0 +1,55 @@
+---
+- name: Require username
+  ansible.builtin.fail:
+    msg: "disable_username is required"
+  when: disable_username == ""
+
+- name: Backup user's authorized_keys
+  ansible.builtin.shell: |
+    USER_HOME=$(getent passwd {{ disable_username }} | cut -d: -f6)
+    if [ -f "$USER_HOME/.ssh/authorized_keys" ]; then
+        cp "$USER_HOME/.ssh/authorized_keys" "/var/log/sentinel-ai/backup-{{ disable_username }}-authorized_keys-{{ ansible_date_time.epoch }}"
+    fi
+  changed_when: false
+
+- name: Lock account
+  ansible.builtin.user:
+    name: "{{ disable_username }}"
+    password_lock: yes
+  when: not dry_run | bool
+
+- name: Expire password
+  ansible.builtin.shell: "chage -E 0 {{ disable_username }}"
+  when: not dry_run | bool
+
+- name: Kill all user sessions
+  ansible.builtin.shell: |
+    pkill -KILL -u {{ disable_username }} 2>/dev/null || true
+    loginctl terminate-user {{ disable_username }} 2>/dev/null || true
+  when:
+    - kill_sessions | bool
+    - not dry_run | bool
+
+- name: Remove from sudoers groups
+  ansible.builtin.shell: |
+    gpasswd -d {{ disable_username }} sudo 2>/dev/null || true
+    gpasswd -d {{ disable_username }} wheel 2>/dev/null || true
+  when:
+    - revoke_sudo | bool
+    - not dry_run | bool
+
+- name: Clear authorized_keys
+  ansible.builtin.shell: |
+    USER_HOME=$(getent passwd {{ disable_username }} | cut -d: -f6)
+    if [ -f "$USER_HOME/.ssh/authorized_keys" ]; then
+        > "$USER_HOME/.ssh/authorized_keys"
+    fi
+  when:
+    - clear_authorized_keys | bool
+    - not dry_run | bool
+
+- name: Log action
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | DISABLE_USER | {{ disable_username }} | locked=yes sudo_revoked={{ revoke_sudo }} keys_cleared={{ clear_authorized_keys }}"
+    create: yes

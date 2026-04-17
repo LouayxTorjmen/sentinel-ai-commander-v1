@@ -1,0 +1,22 @@
+---
+# ─── SENTINEL-AI Global Ansible Variables ─────────────────────────────────────
+
+sentinel_project: sentinel-ai
+sentinel_env: lab
+
+# Notification
+notify_email: soc@localhost
+notify_slack_webhook: ""
+
+# Forensics
+evidence_base_dir: /tmp/sentinel_evidence
+evidence_retention_days: 90
+
+# Firewall backend (iptables | nftables | ufw)
+firewall_backend: iptables
+
+# Block duration in seconds (0 = permanent)
+block_duration_seconds: 3600
+
+# Isolation VLAN/network (set to your quarantine network)
+quarantine_network: "172.25.99.0/24"

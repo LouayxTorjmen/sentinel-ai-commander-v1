@@ -1,0 +1,6 @@
+---
+kill_process_name: ""
+kill_process_pid: ""
+collect_before_kill: true
+kill_signal: "SIGKILL"
+dry_run: false

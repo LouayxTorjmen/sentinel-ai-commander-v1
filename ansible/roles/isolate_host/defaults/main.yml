@@ -1,0 +1,7 @@
+---
+isolate_host_ip: ""
+isolate_host_comment: "SENTINEL-AI isolate"
+management_ips:
+  - "172.31.70.13"     # Wazuh manager
+  - "192.168.49.1"     # SOC admin
+dry_run: false

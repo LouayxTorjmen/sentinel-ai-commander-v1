@@ -1,0 +1,52 @@
+---
+- name: Update package cache (Debian)
+  ansible.builtin.apt:
+    update_cache: yes
+    cache_valid_time: 300
+  when:
+    - ansible_os_family == "Debian"
+    - not dry_run | bool
+
+- name: Install specific packages (Debian)
+  ansible.builtin.apt:
+    name: "{{ patch_packages }}"
+    state: latest
+  when:
+    - ansible_os_family == "Debian"
+    - patch_packages | length > 0
+    - not dry_run | bool
+
+- name: Install specific packages (RHEL)
+  ansible.builtin.dnf:
+    name: "{{ patch_packages }}"
+    state: latest
+  when:
+    - ansible_os_family == "RedHat"
+    - patch_packages | length > 0
+    - not dry_run | bool
+
+- name: Full upgrade fallback if no packages specified (Debian)
+  ansible.builtin.apt:
+    upgrade: safe
+  when:
+    - ansible_os_family == "Debian"
+    - patch_packages | length == 0
+    - not dry_run | bool
+
+- name: Check if reboot needed
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: reboot_required
+
+- name: Reboot if required and allowed
+  ansible.builtin.reboot:
+  when:
+    - reboot_required.stat.exists
+    - patch_reboot_if_needed | bool
+    - not dry_run | bool
+
+- name: Log patch action
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | PATCH | cve={{ patch_cve_id }} packages={{ patch_packages }}"
+    create: yes

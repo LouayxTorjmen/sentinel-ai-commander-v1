@@ -1,0 +1,51 @@
+---
+- name: Flush existing rules (backup first)
+  ansible.builtin.shell: |
+    iptables-save > /tmp/iptables.pre-isolate.{{ ansible_date_time.epoch }}
+  changed_when: false
+  when: not dry_run | bool
+
+- name: Set default policies to DROP
+  ansible.builtin.shell: |
+    iptables -P INPUT DROP
+    iptables -P FORWARD DROP
+    iptables -P OUTPUT DROP
+  when: not dry_run | bool
+
+- name: Allow loopback
+  ansible.builtin.shell: |
+    iptables -A INPUT -i lo -j ACCEPT
+    iptables -A OUTPUT -o lo -j ACCEPT
+  when: not dry_run | bool
+
+- name: Allow established connections
+  ansible.builtin.shell: |
+    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+  when: not dry_run | bool
+
+- name: Allow SSH from management IPs
+  ansible.builtin.iptables:
+    chain: INPUT
+    source: "{{ item }}"
+    protocol: tcp
+    destination_port: 22
+    jump: ACCEPT
+    comment: "SENTINEL: mgmt SSH"
+  loop: "{{ management_ips }}"
+  when: not dry_run | bool
+
+- name: Allow outbound to Wazuh manager
+  ansible.builtin.iptables:
+    chain: OUTPUT
+    destination: "{{ item }}"
+    jump: ACCEPT
+    comment: "SENTINEL: Wazuh reporting"
+  loop: "{{ management_ips }}"
+  when: not dry_run | bool
+
+- name: Log isolation
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | ISOLATE_HOST | {{ ansible_hostname }} | {{ isolate_host_comment }}"
+    create: yes

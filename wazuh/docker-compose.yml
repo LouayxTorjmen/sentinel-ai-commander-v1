@@ -1,0 +1,188 @@
+# =============================================================================
+#  Phase 1 — Wazuh Isolated Stack
+#
+#  Networks:
+#    wazuh_internal  (172.29.0.0/24, internal)  — indexer ↔ manager ↔ dashboard
+#    wazuh_api_bridge (172.30.0.0/24, external) — manager API → AI agents
+#
+#  Agent connectivity:
+#    Ports 1514/1515 are bound to ${LISTEN_ADDRESS} so that Wazuh agents
+#    on monitored hosts (LAN, VPN, remote) can enroll and report.
+# =============================================================================
+
+name: sentinel-wazuh
+
+networks:
+  wazuh_internal:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+
+  wazuh_api_bridge:
+    driver: bridge
+    name: sentinel_wazuh_api_bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+  wazuh_indexer_bridge:
+    driver: bridge
+    name: sentinel_wazuh_indexer_bridge
+    ipam:
+      config:
+        - subnet: 172.30.1.0/24
+
+volumes:
+  suricata-logs:
+    external: true
+    name: sentinel_suricata_logs
+  wazuh-indexer-data:
+  wazuh-manager-etc:
+  wazuh-manager-logs:
+  wazuh-manager-queue:
+  wazuh-manager-var-multigroups:
+  wazuh-manager-integrations:
+  wazuh-manager-active-response:
+  wazuh-manager-agentless:
+  wazuh-manager-wodles:
+  wazuh-manager-api-config:
+  wazuh-filebeat-etc:
+  wazuh-filebeat-var:
+  wazuh-dashboard-config:
+  wazuh-dashboard-custom:
+
+services:
+
+  # ── OpenSearch Indexer ────────────────────────────────────────────────────
+  wazuh-indexer:
+    image: wazuh/wazuh-indexer:4.14.4
+    container_name: sentinel-wazuh-indexer
+    hostname: wazuh.indexer
+    restart: always
+    networks:
+      wazuh_internal:
+        ipv4_address: 172.29.0.11
+      wazuh_indexer_bridge:
+    environment:
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - wazuh-indexer-data:/var/lib/wazuh-indexer
+      - ./config/certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/certs/wazuh.indexer.pem:/usr/share/wazuh-indexer/config/certs/indexer.pem
+      - ./config/certs/wazuh.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/indexer-key.pem
+      - ./config/certs/admin.pem:/usr/share/wazuh-indexer/config/certs/admin.pem
+      - ./config/certs/admin-key.pem:/usr/share/wazuh-indexer/config/certs/admin-key.pem
+      - ./config/indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9200'"]
+      interval: 30s
+      timeout: 10s
+      retries: 15
+      start_period: 90s
+    ports:
+      - "127.0.0.1:${PORT_WAZUH_INDEXER:-50002}:9200"
+
+  # ── Wazuh Manager ────────────────────────────────────────────────────────
+  wazuh-manager:
+    image: wazuh/wazuh-manager:4.14.4
+    container_name: sentinel-wazuh-manager
+    hostname: wazuh.manager
+    restart: always
+    networks:
+      wazuh_internal:
+        ipv4_address: 172.29.0.10
+      wazuh_api_bridge:
+        ipv4_address: 172.30.0.10
+    ports:
+      # Agent enrollment — open to all interfaces for remote agents
+      - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_WAZUH_AGENT_ENROLL:-50042}:1515/tcp"
+      # Agent communication — open to all interfaces
+      - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_WAZUH_AGENT_COMM_TCP:-50041}:1514/tcp"
+      - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_WAZUH_AGENT_COMM_UDP:-50040}:1514/udp"
+      # Syslog receiver — open to all for forwarding
+      - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_WAZUH_SYSLOG:-50050}:514/udp"
+      # Manager API — localhost only (AI agents access via bridge network)
+      - "127.0.0.1:${PORT_WAZUH_API:-50001}:55000"
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_USERNAME=${WAZUH_INDEXER_USER:-admin}
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat.key
+      - API_USERNAME=${WAZUH_API_USER:-wazuh-wui}
+      - API_PASSWORD=${WAZUH_API_PASSWORD}
+    volumes:
+      - wazuh-manager-api-config:/var/ossec/api/configuration
+      - wazuh-manager-etc:/var/ossec/etc
+      - wazuh-manager-logs:/var/ossec/logs
+      - wazuh-manager-queue:/var/ossec/queue
+      - wazuh-manager-var-multigroups:/var/ossec/var/multigroups
+      - wazuh-manager-integrations:/var/ossec/integrations
+      - wazuh-manager-active-response:/var/ossec/active-response/bin
+      - wazuh-manager-agentless:/var/ossec/agentless
+      - wazuh-manager-wodles:/var/ossec/wodles
+      - wazuh-filebeat-etc:/etc/filebeat
+      - wazuh-filebeat-var:/var/lib/filebeat
+      # TLS certs
+      - ./config/certs/root-ca-manager.pem:/etc/ssl/root-ca.pem:ro
+      - ./config/certs/wazuh.manager.pem:/etc/ssl/filebeat.pem:ro
+      - ./config/certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key:ro
+      # Custom config
+      - ./config/manager/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
+      - ./config/filebeat.yml:/etc/filebeat/filebeat.yml:ro
+      - ./config/manager/local_rules.xml:/wazuh-config-mount/etc/rules/local_rules.xml:ro
+      - ./config/manager/local_decoder.xml:/wazuh-config-mount/etc/decoders/local_decoder.xml:ro
+      # Suricata shared logs
+      - suricata-logs:/var/log/suricata:ro
+    depends_on:
+      wazuh-indexer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sk https://localhost:55000/ | grep -q title"]
+      interval: 30s
+      timeout: 15s
+      retries: 15
+      start_period: 120s
+
+  # ── Wazuh Dashboard ──────────────────────────────────────────────────────
+  wazuh-dashboard:
+    image: wazuh/wazuh-dashboard:4.14.4
+    container_name: sentinel-wazuh-dashboard
+    hostname: wazuh.dashboard
+    restart: always
+    networks:
+      wazuh_internal:
+        ipv4_address: 172.29.0.12
+      wazuh_api_bridge:
+    ports:
+      - "127.0.0.1:${PORT_WAZUH_DASHBOARD:-50000}:5601"
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      - WAZUH_API_URL=https://wazuh.manager
+      - API_USERNAME=${WAZUH_API_USER:-wazuh-wui}
+      - API_PASSWORD=${WAZUH_API_PASSWORD}
+      - DASHBOARD_USERNAME=admin
+      - DASHBOARD_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+    volumes:
+      - ./config/certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem:ro
+      - ./config/certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem:ro
+      - ./config/certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem:ro
+      - ./config/dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
+    depends_on:
+      wazuh-indexer:
+        condition: service_healthy
+      wazuh-manager:
+        condition: service_healthy

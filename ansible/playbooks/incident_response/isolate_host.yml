@@ -1,0 +1,56 @@
+---
+- name: "Isolate Compromised Host — Incident Response"
+  hosts: "{{ target_host | mandatory }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    management_ip: "{{ management_ip | mandatory }}"
+    incident_id: "{{ incident_id | default('CRITICAL') }}"
+
+  tasks:
+
+    - name: "Log isolation action"
+      command: >
+        logger -t secops-ansible
+        "INCIDENT={{ incident_id }} ACTION=isolate_host HOST={{ inventory_hostname }}
+        REASON=critical_severity MGMT_IP={{ management_ip }}"
+
+    - name: "Allow loopback"
+      iptables:
+        chain: INPUT
+        in_interface: lo
+        jump: ACCEPT
+
+    - name: "Allow established SSH from management host"
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        source: "{{ management_ip }}"
+        destination_port: "22"
+        ctstate: NEW,ESTABLISHED
+        jump: ACCEPT
+
+    - name: "Allow DNS outbound"
+      iptables:
+        chain: OUTPUT
+        protocol: udp
+        destination_port: "53"
+        jump: ACCEPT
+
+    - name: "DROP all other inbound traffic"
+      iptables:
+        chain: INPUT
+        jump: DROP
+
+    - name: "DROP all other outbound traffic"
+      iptables:
+        chain: OUTPUT
+        jump: DROP
+
+    - name: "Report isolation complete"
+      debug:
+        msg: >
+          HOST {{ inventory_hostname }} ISOLATED.
+          Incident: {{ incident_id }}.
+          Only SSH from {{ management_ip }} remains accessible.

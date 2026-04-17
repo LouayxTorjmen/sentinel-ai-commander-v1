@@ -1,0 +1,93 @@
+# =============================================================================
+#  SENTINEL-AI COMMANDER — Infrastructure Stack
+#  Services: PostgreSQL, Redis, Nginx reverse proxy
+#  Depends on: Wazuh stack (for wazuh_api_bridge network)
+# =============================================================================
+
+name: sentinel-infra
+
+networks:
+  sentinel_internal:
+    driver: bridge
+    name: sentinel_internal
+
+  wazuh_api_bridge:
+    external: true
+    name: sentinel_wazuh_api_bridge
+
+volumes:
+  postgres-data:
+    name: sentinel_postgres_data
+  redis-data:
+    name: sentinel_redis_data
+
+services:
+
+  # ── PostgreSQL — Incident database ──────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentinel-postgres
+    hostname: sentinel-postgres
+    restart: unless-stopped
+    networks:
+      - sentinel_internal
+    ports:
+      - "127.0.0.1:${PORT_POSTGRES:-50031}:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-sentinel}
+      - POSTGRES_USER=${POSTGRES_USER:-sentinel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel} -d ${POSTGRES_DB:-sentinel}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── Redis — Pub/sub + alert cache + incident caching ────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: sentinel-redis
+    hostname: sentinel-redis
+    restart: unless-stopped
+    networks:
+      - sentinel_internal
+    ports:
+      - "127.0.0.1:${PORT_REDIS:-50030}:6379"
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ── Nginx — TLS reverse proxy ───────────────────────────────────────────
+  nginx:
+    build:
+      context: ./docker/nginx
+      dockerfile: Dockerfile
+    container_name: sentinel-nginx
+    hostname: sentinel-nginx
+    restart: unless-stopped
+    networks:
+      - sentinel_internal
+      - wazuh_api_bridge
+    ports:
+      - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_NGINX_HTTP:-50020}:80"
+      - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_NGINX_HTTPS:-50021}:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      redis:
+        condition: service_healthy

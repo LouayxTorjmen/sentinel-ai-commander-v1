@@ -1,0 +1,141 @@
+# =============================================================================
+#  SENTINEL-AI COMMANDER — AI Platform Stack
+#  Services: AI Agents (FastAPI), Ansible Runner, Ollama (local LLM fallback)
+#  Depends on: Wazuh stack (api/indexer bridges), Infra stack (internal net),
+#              Suricata stack (shared log volume)
+# =============================================================================
+ 
+name: sentinel-ai
+ 
+networks:
+  sentinel_internal:
+    external: true
+    name: sentinel_internal
+ 
+  wazuh_api_bridge:
+    external: true
+    name: sentinel_wazuh_api_bridge
+ 
+  wazuh_indexer_bridge:
+    external: true
+    name: sentinel_wazuh_indexer_bridge
+ 
+    external: true
+ 
+volumes:
+  suricata-logs:
+    external: true
+    name: sentinel_suricata_logs
+  ollama-models:
+    name: sentinel_ollama_models
+  ml-models:
+    name: sentinel_ml_models
+ 
+services:
+ 
+  # ── Ollama — Local LLM for offline resilience (Point 5) ────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sentinel-ollama
+    hostname: sentinel-ollama
+    restart: unless-stopped
+    networks:
+      - sentinel_internal
+    ports:
+      - "127.0.0.1:${PORT_OLLAMA:-50060}:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    healthcheck:
+      test: ["CMD-SHELL", "pidof ollama || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+ 
+  # ── AI Agents — FastAPI + DSPy + RAG + ML orchestrator ──────────────────
+  ai-agents:
+    build:
+      context: .
+      dockerfile: docker/ai-agents/Dockerfile
+    container_name: sentinel-ai-agents
+    hostname: sentinel-ai-agents
+    restart: unless-stopped
+    networks:
+      - sentinel_internal
+      - wazuh_api_bridge
+      - wazuh_indexer_bridge
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "127.0.0.1:${PORT_AI_AGENTS:-50010}:8000"
+    environment:
+      # LLM — primary (Groq cloud)
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-llama-3.3-70b-versatile}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
+      # LLM — fallback (Ollama local)
+      - OLLAMA_BASE_URL=http://sentinel-ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+      - LLM_FALLBACK_ENABLED=${LLM_FALLBACK_ENABLED:-true}
+      # Wazuh
+      - WAZUH_API_URL=https://sentinel-wazuh-manager:55000
+      - WAZUH_API_USER=${WAZUH_API_USER:-wazuh-wui}
+      - WAZUH_API_PASSWORD=${WAZUH_API_PASSWORD}
+      - WAZUH_SSL_VERIFY=false
+      - WAZUH_MANAGER_HOST=sentinel-wazuh-manager
+      - WAZUH_INDEXER_HOST=sentinel-wazuh-indexer
+      - WAZUH_INDEXER_PORT=9200
+      - WAZUH_INDEXER_USER=${WAZUH_INDEXER_USER:-admin}
+      - WAZUH_INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      # Data stores
+      - REDIS_HOST=sentinel-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - POSTGRES_HOST=sentinel-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-sentinel}
+      - POSTGRES_USER=${POSTGRES_USER:-sentinel}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # Ansible
+      - ANSIBLE_RUNNER_HOST=sentinel-ansible-runner
+      - ANSIBLE_RUNNER_PORT=5001
+      - ANSIBLE_CONFIDENCE_THRESHOLD=${ANSIBLE_CONFIDENCE_THRESHOLD:-0.85}
+      # Other
+      - NVD_API_KEY=${NVD_API_KEY:-}
+      # ML
+      - ML_MODELS_PATH=/models
+      - ML_ANOMALY_CONTAMINATION=${ML_ANOMALY_CONTAMINATION:-0.05}
+    volumes:
+      - suricata-logs:/var/log/suricata:ro
+      - ml-models:/models
+    depends_on:
+      ollama:
+        condition: service_healthy
+ 
+  # ── Ansible Runner — Flask microservice for playbook execution ──────────
+  ansible-runner:
+    build:
+      context: ./docker/ansible-runner
+      dockerfile: Dockerfile
+    container_name: sentinel-ansible-runner
+    hostname: sentinel-ansible-runner
+    restart: unless-stopped
+    networks:
+      - sentinel_internal
+      - wazuh_api_bridge
+    ports:
+      - "127.0.0.1:${PORT_ANSIBLE_RUNNER:-50011}:5001"
+    environment:
+      - ANSIBLE_RUNNER_PORT=5001
+      - ANSIBLE_BASE=/ansible
+      - RUNNER_BASE=/ansible
+    volumes:
+      - ./ansible:/ansible:ro

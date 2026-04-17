@@ -1,0 +1,20 @@
+---
+- name: SENTINEL-AI — Permissions Restore Response
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+
+  roles:
+    - role: collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+        collect_network: false
+
+    - role: enforce_permissions
+      vars:
+        enforce_custom_paths: "{{ custom_paths }}"
+
+    - role: notify_soc
+      vars:
+        notify_subject: "Permissions enforced"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"

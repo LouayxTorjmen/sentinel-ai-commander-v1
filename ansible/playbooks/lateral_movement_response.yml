@@ -1,0 +1,36 @@
+---
+- name: SENTINEL-AI — Lateral Movement Response
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+
+  roles:
+    - role: collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+        evidence_target_ip: "{{ source_ip }}"
+
+    - role: block_ip
+      vars:
+        block_ip_address: "{{ source_ip }}"
+        block_ip_comment: "SENTINEL-AI: Lateral movement source — incident {{ incident_id }}"
+        block_duration_seconds: 7200
+      when: source_ip != ""
+
+    - role: block_ip
+      vars:
+        block_ip_address: "{{ dest_ip }}"
+        block_ip_comment: "SENTINEL-AI: Lateral movement dest — incident {{ incident_id }}"
+        block_duration_seconds: 3600
+      when: dest_ip != ""
+
+    - role: notify_soc
+      vars:
+        notify_subject: "Lateral Movement Detected and Blocked"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"
+        notify_message: |
+          Lateral movement response executed.
+          Source {{ source_ip }} blocked for 2 hours.
+          Destination {{ dest_ip }} blocked for 1 hour.
+          Incident ID: {{ incident_id }}
+          Manual investigation of both hosts is recommended.

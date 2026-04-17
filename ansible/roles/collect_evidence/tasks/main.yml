@@ -1,0 +1,54 @@
+---
+- name: Create evidence directory
+  ansible.builtin.file:
+    path: "{{ evidence_dir }}/{{ evidence_incident_id }}"
+    state: directory
+    mode: '0700'
+
+- name: Snapshot processes
+  ansible.builtin.shell: ps auxfww > {{ evidence_dir }}/{{ evidence_incident_id }}/processes.txt
+  when: collect_processes | bool
+
+- name: Snapshot network state
+  ansible.builtin.shell: |
+    {
+      echo "=== ss -tunap ==="
+      ss -tunap 2>/dev/null
+      echo "=== netstat ==="
+      netstat -antp 2>/dev/null || true
+      echo "=== ip route ==="
+      ip route
+      echo "=== iptables ==="
+      iptables -L -n -v
+    } > {{ evidence_dir }}/{{ evidence_incident_id }}/network.txt
+  when: collect_network | bool
+
+- name: Snapshot logins
+  ansible.builtin.shell: |
+    {
+      echo "=== who ==="
+      who
+      echo "=== last -20 ==="
+      last -20 2>/dev/null
+      echo "=== lastlog ==="
+      lastlog 2>/dev/null | head -30
+    } > {{ evidence_dir }}/{{ evidence_incident_id }}/logins.txt
+  when: collect_logs | bool
+
+- name: Snapshot recent auth log
+  ansible.builtin.shell: |
+    tail -500 /var/log/auth.log 2>/dev/null || tail -500 /var/log/secure 2>/dev/null || echo "no auth log"
+  register: auth_log_out
+  changed_when: false
+
+- name: Save auth log
+  ansible.builtin.copy:
+    content: "{{ auth_log_out.stdout }}"
+    dest: "{{ evidence_dir }}/{{ evidence_incident_id }}/auth.log"
+  when: collect_logs | bool
+
+- name: Log evidence collection
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | COLLECT_EVIDENCE | incident={{ evidence_incident_id }} | dir={{ evidence_dir }}/{{ evidence_incident_id }}"
+    create: yes
