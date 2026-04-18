@@ -21,6 +21,10 @@ ALLOWED_PLAYBOOKS = {
     "malware_containment",
     "lateral_movement_response",
     "vulnerability_patch",
+    "file_quarantine_response",
+    "compromised_user_response",
+    "permissions_restore_response",
+    "fim_restore_response",
 }
 
 @app.route("/health", methods=["GET"])
