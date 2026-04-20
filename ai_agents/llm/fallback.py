@@ -23,7 +23,7 @@ class LLMProvider:
         self._groq_model = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
         
         self._gemini_api_key = os.getenv("GEMINI_API_KEY", "")
-        self._gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        _raw = os.getenv("GEMINI_MODEL", "gemini-2.5-flash"); self._gemini_model = _raw.removeprefix("gemini/").removeprefix("models/")
 
         self._ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://sentinel-ollama:11434")
         self._ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
