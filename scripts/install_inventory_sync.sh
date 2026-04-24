@@ -12,7 +12,7 @@
 #       safe to re-run).
 #    2. Copies scripts/sync_inventory.py into the container.
 #    3. Runs the sync script once to seed the indices.
-#    4. Registers a host cron entry running the sync every 15 minutes.
+#    4. Registers a host cron entry running the sync every minute.
 #
 #  Requirements:
 #    - sentinel-wazuh-manager container must be running and healthy
@@ -60,6 +60,10 @@ SYNC_SRC="$PROJECT_ROOT/scripts/sync_inventory.py"
 SYNC_DEST="/usr/local/bin/sync_inventory.py"
 
 # ─── 0. Preflight: is the manager container running? ────────────────────────
+if ! command -v flock >/dev/null 2>&1; then
+    fail "flock(1) not found — install util-linux (apt install util-linux / dnf install util-linux-core)"
+    exit 1
+fi
 if ! docker ps --format '{{.Names}}' | grep -q "^${MANAGER_CONTAINER}\$"; then
     fail "Container ${MANAGER_CONTAINER} is not running."
     warn "Start the Wazuh stack first:  make wazuh-up  (or  make phase1)"
@@ -105,11 +109,14 @@ else
     warn "Common causes: wazuh-db socket down (try: docker exec $MANAGER_CONTAINER /var/ossec/bin/wazuh-control start)"
 fi
 
-# ─── 4. Install host cron job (every 15 minutes) ────────────────────────────
+# ─── 4. Install host cron job (every minute) ────────────────────────────
 CRON_MARKER="# wazuh-inventory-sync (sentinel-ai-commander)"
-CRON_CMD="*/15 * * * * docker exec -e WAZUH_INVENTORY_SYNC_CREDS='${INDEXER_USER}:${INDEXER_PASS}' $MANAGER_CONTAINER python3 $SYNC_DEST >> /var/log/wazuh_inventory_auto.log 2>&1"
+# Run every minute. flock prevents overlapping runs if the sync ever takes
+# longer than 60s (an agent's SQLite is unreachable, large packages table, etc).
+# -n = fail fast if already locked (don't queue); -x = exclusive lock.
+CRON_CMD="* * * * * /usr/bin/flock -n /tmp/wazuh_inventory_sync.lock -c \"docker exec -e WAZUH_INVENTORY_SYNC_CREDS='${INDEXER_USER}:${INDEXER_PASS}' $MANAGER_CONTAINER python3 $SYNC_DEST\" >> /var/log/wazuh_inventory_auto.log 2>&1"
 
-info "Installing host cron job (every 15 minutes)..."
+info "Installing host cron job (every minute)..."
 
 # Read existing crontab (may be empty).  Strip any previous sentinel entry
 # so re-runs don't stack duplicates.
@@ -139,4 +146,4 @@ echo "  Manually trigger a sync at any time:"
 echo "    docker exec $MANAGER_CONTAINER python3 $SYNC_DEST"
 echo ""
 echo "  When a new agent is enrolled via enroll.py, it will be picked up"
-echo "  automatically on the next 15-minute tick (no extra action required)."
+echo "  automatically on the next 1-minute tick (no extra action required)."
