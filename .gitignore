@@ -102,3 +102,4 @@ wazuh/config/filebeat.yml
 wazuh/config/dashboard/opensearch_dashboards.yml
 wazuh/config/dashboard/wazuh.yml
 wazuh/config/indexer/internal_users.yml
+enroll.py.prebackup

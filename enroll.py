@@ -569,6 +569,23 @@ if grep -q '<enrollment>' "$CONF"; then
 else
     sed -i '/<\\/server>/a\\    <enrollment>\\n      <enabled>no</enabled>\\n    </enrollment>' "$CONF"
 fi
+# Shorten syscollector scan interval from 1h default to 10m so IT Hygiene
+# reflects user/group/package changes quickly. Only rewrites the <interval>
+# inside the <wodle name="syscollector"> block, not other intervals.
+python3 - << 'PYEOF'
+import re
+conf = "/var/ossec/etc/ossec.conf"
+with open(conf) as f:
+    content = f.read()
+new_content = re.sub(
+    r'(<wodle name="syscollector">.*?)<interval>1h</interval>',
+    r'\\1<interval>10m</interval>',
+    content, flags=re.DOTALL, count=1
+)
+if new_content != content:
+    with open(conf, "w") as f:
+        f.write(new_content)
+PYEOF
 echo CONFIG_DONE
 """
     out, _, _ = ssh_script(ip, config_script, timeout=15)
