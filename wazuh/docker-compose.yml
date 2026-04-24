@@ -66,7 +66,11 @@ services:
         ipv4_address: 172.29.0.11
       wazuh_indexer_bridge:
     environment:
-      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g
+      - OPENSEARCH_HEAP_SIZE=2g
+      - cluster.routing.allocation.disk.watermark.low=5gb
+      - cluster.routing.allocation.disk.watermark.high=2gb
+      - cluster.routing.allocation.disk.watermark.flood_stage=1gb
     ulimits:
       memlock:
         soft: -1
