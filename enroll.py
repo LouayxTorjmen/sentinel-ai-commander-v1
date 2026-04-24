@@ -586,6 +586,53 @@ if new_content != content:
     with open(conf, "w") as f:
         f.write(new_content)
 PYEOF
+# Enable realtime FIM + 5-minute scan + alert_new_files for responsive FIM.
+# Upstream's <syscheck> defaults (12h scheduled scan, no realtime, no
+# alert_new_files) mean file changes go unnoticed for up to 12 hours.
+python3 - << 'PYEOF'
+import re
+conf = "/var/ossec/etc/ossec.conf"
+with open(conf) as f:
+    content = f.read()
+
+orig = content
+
+# 1. Change <frequency>43200</frequency> (12h) to 300 (5m) inside <syscheck>
+content = re.sub(
+    r'(<syscheck>.*?)<frequency>43200</frequency>',
+    r'\\1<frequency>300</frequency>',
+    content, flags=re.DOTALL, count=1
+)
+
+# 2. Add realtime="yes" check_all="yes" report_changes="yes" to bare
+#    <directories>...</directories> tags inside <syscheck>
+def patch_syscheck(match):
+    block = match.group(0)
+    block = re.sub(
+        r'<directories>(?!.*realtime)([^<]+)</directories>',
+        r'<directories realtime="yes" check_all="yes" report_changes="yes">\\1</directories>',
+        block,
+    )
+    return block
+
+content = re.sub(
+    r'<syscheck>.*?</syscheck>',
+    patch_syscheck,
+    content, flags=re.DOTALL, count=1
+)
+
+# 3. Add <alert_new_files>yes</alert_new_files> right after <disabled>no</disabled>
+if '<alert_new_files>' not in content:
+    content = re.sub(
+        r'(<syscheck>\\s*<disabled>no</disabled>)',
+        r'\\1\\n    <alert_new_files>yes</alert_new_files>',
+        content, count=1
+    )
+
+if content != orig:
+    with open(conf, "w") as f:
+        f.write(content)
+PYEOF
 echo CONFIG_DONE
 """
     out, _, _ = ssh_script(ip, config_script, timeout=15)
