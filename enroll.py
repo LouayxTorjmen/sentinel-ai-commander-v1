@@ -569,70 +569,6 @@ if grep -q '<enrollment>' "$CONF"; then
 else
     sed -i '/<\\/server>/a\\    <enrollment>\\n      <enabled>no</enabled>\\n    </enrollment>' "$CONF"
 fi
-# Shorten syscollector scan interval from 1h default to 10m so IT Hygiene
-# reflects user/group/package changes quickly. Only rewrites the <interval>
-# inside the <wodle name="syscollector"> block, not other intervals.
-python3 - << 'PYEOF'
-import re
-conf = "/var/ossec/etc/ossec.conf"
-with open(conf) as f:
-    content = f.read()
-new_content = re.sub(
-    r'(<wodle name="syscollector">.*?)<interval>1h</interval>',
-    r'\\1<interval>10m</interval>',
-    content, flags=re.DOTALL, count=1
-)
-if new_content != content:
-    with open(conf, "w") as f:
-        f.write(new_content)
-PYEOF
-# Enable realtime FIM + 5-minute scan + alert_new_files for responsive FIM.
-# Upstream's <syscheck> defaults (12h scheduled scan, no realtime, no
-# alert_new_files) mean file changes go unnoticed for up to 12 hours.
-python3 - << 'PYEOF'
-import re
-conf = "/var/ossec/etc/ossec.conf"
-with open(conf) as f:
-    content = f.read()
-
-orig = content
-
-# 1. Change <frequency>43200</frequency> (12h) to 300 (5m) inside <syscheck>
-content = re.sub(
-    r'(<syscheck>.*?)<frequency>43200</frequency>',
-    r'\\1<frequency>300</frequency>',
-    content, flags=re.DOTALL, count=1
-)
-
-# 2. Add realtime="yes" check_all="yes" report_changes="yes" to bare
-#    <directories>...</directories> tags inside <syscheck>
-def patch_syscheck(match):
-    block = match.group(0)
-    block = re.sub(
-        r'<directories>(?!.*realtime)([^<]+)</directories>',
-        r'<directories realtime="yes" check_all="yes" report_changes="yes">\\1</directories>',
-        block,
-    )
-    return block
-
-content = re.sub(
-    r'<syscheck>.*?</syscheck>',
-    patch_syscheck,
-    content, flags=re.DOTALL, count=1
-)
-
-# 3. Add <alert_new_files>yes</alert_new_files> right after <disabled>no</disabled>
-if '<alert_new_files>' not in content:
-    content = re.sub(
-        r'(<syscheck>\\s*<disabled>no</disabled>)',
-        r'\\1\\n    <alert_new_files>yes</alert_new_files>',
-        content, count=1
-    )
-
-if content != orig:
-    with open(conf, "w") as f:
-        f.write(content)
-PYEOF
 echo CONFIG_DONE
 """
     out, _, _ = ssh_script(ip, config_script, timeout=15)
@@ -667,6 +603,31 @@ echo CONFIG_DONE
 
     if not connected:
         print(f"{Y}    (Agent started but not yet confirmed connected){RST}")
+
+    # ── Push canonical SOC config template ────────────────────────────
+    # Apply the full SOC ossec.conf template from wazuh/config/agents/
+    # (monitors /home, /root, /var/www, /srv in addition to system dirs;
+    # enables SCA; enables proper FIM realtime; syscollector 10-min; etc).
+    # If this fails the agent is still enrolled with upstream defaults —
+    # warn but continue.
+    print(f"{C}    Applying SOC config template via deploy_agent_configs.sh...{RST}")
+    deploy_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "scripts", "deploy_agent_configs.sh")
+    if os.path.isfile(deploy_script):
+        rc = subprocess.run(
+            ["bash", deploy_script, ip],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            timeout=120,
+        ).returncode
+        if rc == 0:
+            print(f"{G}    SOC config template applied{RST}")
+        else:
+            print(f"{Y}[!] Template deploy returned rc={rc}; agent still works "
+                  f"but with upstream defaults. Re-run manually:{RST}")
+            print(f"    bash scripts/deploy_agent_configs.sh {ip}")
+    else:
+        print(f"{Y}[!] scripts/deploy_agent_configs.sh missing — skipping{RST}")
+
 
     return True
 
