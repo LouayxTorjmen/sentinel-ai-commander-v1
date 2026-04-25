@@ -353,15 +353,18 @@ class ChatEngine:
             parts.append(f"=== INCIDENT STATISTICS ===\n{json.dumps(context['stats'], indent=2, default=str)}")
 
         if context["wazuh_alerts"]:
+            # Show up to 20 alerts to the LLM (not 5) — for multi-event
+            # scenarios like nmap port sweeps the LLM needs to see the
+            # full set of dest_port values to answer "which ports".
             parts.append(
                 f"=== RECENT WAZUH ALERTS ({len(context['wazuh_alerts'])}) ===\n"
-                + json.dumps(context["wazuh_alerts"][:5], indent=2, default=str)
+                + json.dumps(context["wazuh_alerts"][:20], indent=2, default=str)
             )
 
         if context.get("archives"):
             parts.append(
                 f"=== WAZUH ARCHIVES — ALL RAW EVENTS incl. pfSense syslog ({len(context['archives'])}) ===\n"
-                + json.dumps(context["archives"][:5], indent=2, default=str)
+                + json.dumps(context["archives"][:20], indent=2, default=str)
             )
 
         if context.get("monitoring"):

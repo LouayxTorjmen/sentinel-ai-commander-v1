@@ -128,6 +128,11 @@ def _parse_time_window(query: str) -> str:
     if re.search(r'\byesterday\b', q):
         return "now-1d/d"
 
+    # "any/did/ever/have you seen X" -> 30 days (no explicit time mention,
+    # but the question is about whether something has happened at all)
+    if re.search(r'\b(any|did|has|have|ever|seen|happened?|occur(?:red)?)\b', q):
+        return "now-30d"
+
     # Default: 24 hours
     return "now-24h"
 
@@ -242,21 +247,37 @@ def _build_opensearch_body(tokens: Dict, limit: int, index_time_field: str = "ti
     # This is what was missing before — nmap/brute force/etc were never
     # matched against the actual text content of alerts.
     if tokens["keywords"]:
+        # rule.description and data.alert.signature are mapped as 'keyword' in
+        # the Wazuh indexer (verified via _mapping/field). multi_match against
+        # keyword fields does NOT tokenize substrings - only exact-string
+        # match works. We need wildcard for substring search on those fields.
+        # full_log is 'text' so multi_match still works there with fuzziness.
         keyword_clauses = []
-        for kw in tokens["keywords"][:8]:  # cap at 8 keywords to avoid query explosion
+        for kw in tokens["keywords"][:8]:  # cap to avoid query explosion
+            kw_lower = kw.lower()
+            kw_upper = kw.upper()
+            # text-field match (full_log) - fuzzy, handles typos
             keyword_clauses.append({"multi_match": {
                 "query": kw,
                 "fields": [
-                    "rule.description^3",     # description gets highest weight
-                    "rule.groups^2",
                     "full_log",
                     "agent.name",
                     "data.srcip",
                     "data.dstip",
                 ],
                 "type": "best_fields",
-                "fuzziness": "AUTO",          # handles typos: "namp" → "nmap"
+                "fuzziness": "AUTO",
             }})
+            # keyword-field wildcard - case-variant substring match.
+            # data.alert.signature is the most informative Suricata field
+            # (ET SCAN NMAP -sS window 1024 etc) - was missing from search.
+            for field in ("rule.description", "data.alert.signature"):
+                keyword_clauses.append({"wildcard": {field: f"*{kw_lower}*"}})
+                keyword_clauses.append({"wildcard": {field: f"*{kw_upper}*"}})
+                if kw != kw_lower and kw != kw_upper:
+                    keyword_clauses.append({"wildcard": {field: f"*{kw}*"}})
+            # rule.groups is a keyword array - exact-token match works
+            keyword_clauses.append({"match_phrase": {"rule.groups": kw_lower}})
 
         if tokens["ips"] or tokens["agent_names"] or tokens["mitre_ids"]:
             # When we have hard filters, keywords become a SHOULD (bonus relevance)
@@ -278,16 +299,27 @@ def _build_opensearch_body(tokens: Dict, limit: int, index_time_field: str = "ti
     if must_not:
         body["query"]["bool"]["must_not"] = must_not
 
-    # Add keyword as should (relevance booster) even when other filters exist
+    # Add keyword as MUST (required match) when hard filters exist.
+    # Original made this a `should` (booster) but in practice a query like
+    # "any nmap alerts from kali-agent-1?" needs the keyword to narrow,
+    # otherwise the agent.name filter alone returns hundreds of unrelated
+    # alerts. Promote keyword clauses to MUST so they actually filter.
     if tokens["keywords"] and (tokens["ips"] or tokens["agent_names"]):
         keyword_clauses = []
         for kw in tokens["keywords"][:8]:
-            keyword_clauses.append({"multi_match": {
-                "query": kw,
-                "fields": ["rule.description^3", "rule.groups^2", "full_log"],
-            }})
-        body["query"]["bool"]["should"] = keyword_clauses
-        body["query"]["bool"]["boost"] = 1.5
+            kw_lower = kw.lower()
+            kw_upper = kw.upper()
+            keyword_clauses.append({"match": {"full_log": kw}})
+            for field in ("rule.description", "data.alert.signature"):
+                keyword_clauses.append({"wildcard": {field: f"*{kw_lower}*"}})
+                keyword_clauses.append({"wildcard": {field: f"*{kw_upper}*"}})
+                if kw != kw_lower and kw != kw_upper:
+                    keyword_clauses.append({"wildcard": {field: f"*{kw}*"}})
+            keyword_clauses.append({"match_phrase": {"rule.groups": kw_lower}})
+        body["query"]["bool"]["must"].append({"bool": {
+            "should": keyword_clauses,
+            "minimum_should_match": 1,
+        }})
 
     return body
 
@@ -373,24 +405,45 @@ class RAGRetriever:
                 headers={"Content-Type": "application/json"},
             )
             hits = data.get("hits", {}).get("hits", [])
-            return [
-                {
+            results = []
+            for h in hits:
+                src = h["_source"]
+                data = src.get("data", {}) or {}
+                alert = data.get("alert", {}) or {}
+                # IP fields: Wazuh decoder uses srcip/dstip, Suricata's raw
+                # eve.json uses src_ip/dest_ip. Prefer decoded, fall back.
+                src_ip = data.get("srcip") or data.get("src_ip")
+                dst_ip = data.get("dstip") or data.get("dest_ip")
+                # Ports: Suricata alerts populate data.src_port and
+                # data.dest_port (string-typed in eve.json; passed through
+                # by Wazuh manager without conversion).
+                src_port = data.get("src_port") or data.get("srcport")
+                dest_port = data.get("dest_port") or data.get("dstport")
+                results.append({
                     "_doc_id": h.get("_id", ""),
                     "_doc_index": h.get("_index", ""),
-                    "timestamp": h["_source"].get("timestamp"),
-                    "rule_id": h["_source"].get("rule", {}).get("id"),
-                    "rule_level": h["_source"].get("rule", {}).get("level"),
-                    "rule_description": h["_source"].get("rule", {}).get("description"),
-                    "rule_groups": h["_source"].get("rule", {}).get("groups", []),
-                    "agent_name": h["_source"].get("agent", {}).get("name"),
-                    "agent_ip": h["_source"].get("agent", {}).get("ip"),
-                    "src_ip": h["_source"].get("data", {}).get("srcip"),
-                    "dst_ip": h["_source"].get("data", {}).get("dstip"),
-                    "mitre": h["_source"].get("rule", {}).get("mitre", {}),
-                    "full_log": (h["_source"].get("full_log", "") or "")[:200],
-                }
-                for h in hits
-            ]
+                    "timestamp": src.get("timestamp"),
+                    "rule_id": src.get("rule", {}).get("id"),
+                    "rule_level": src.get("rule", {}).get("level"),
+                    "rule_description": src.get("rule", {}).get("description"),
+                    "rule_groups": src.get("rule", {}).get("groups", []),
+                    "agent_name": src.get("agent", {}).get("name"),
+                    "agent_ip": src.get("agent", {}).get("ip"),
+                    "src_ip": src_ip,
+                    "dst_ip": dst_ip,
+                    "src_port": src_port,
+                    "dest_port": dest_port,
+                    "proto": data.get("proto"),
+                    # Suricata-specific (only present for Suricata alerts)
+                    "suricata_signature": alert.get("signature"),
+                    "suricata_signature_id": alert.get("signature_id"),
+                    "suricata_category": alert.get("category"),
+                    "suricata_severity": alert.get("severity"),
+                    "suricata_action": alert.get("action"),
+                    "mitre": src.get("rule", {}).get("mitre", {}),
+                    "full_log": (src.get("full_log", "") or "")[:200],
+                })
+            return results
         except Exception as e:
             logger.warning("rag.wazuh_search_failed: %s", e)
             return []
