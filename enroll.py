@@ -868,9 +868,18 @@ ExecStop=/usr/bin/suricatasc -c shutdown
 
 Restart=on-failure
 
+# Capabilities required for AF_PACKET socket creation (raw packet capture).
+# Source-built Suricata runs as a non-root 'suricata' user, so it MUST be
+# granted these caps explicitly. The packaged Suricata in distros gets
+# this from the distribution's policy; source builds do not.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_NICE CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_NICE CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE
+
 ProtectSystem=full
 ProtectHome=true
-NoNewPrivileges=true
+# NoNewPrivileges MUST be false for AmbientCapabilities to take effect for
+# unprivileged users (systemd security gotcha).
+NoNewPrivileges=false
 
 [Install]
 WantedBy=multi-user.target
@@ -880,6 +889,48 @@ UNITEOF
 [ -f /usr/lib/systemd/system/suricata.service ] && {{
     log "Masking distro-shipped /usr/lib/systemd/system/suricata.service in favor of our unit"
 }}
+
+systemctl daemon-reload
+
+# --- 16. SELinux bootstrap (RHEL family only) ---
+# Source-built Suricata bypasses the distribution's SELinux policy module
+# (typically named 'suricata' and shipped in the suricata-selinux package).
+# Without that policy, Enforcing mode denies AF_PACKET socket creation —
+# Suricata runs but captures zero packets, with no error visible from
+# `systemctl is-active`. Mitigation: bootstrap by running once in Permissive
+# so Suricata initializes its runtime files (eve.json, command socket,
+# /run/suricata/*) with default contexts that Enforcing mode then accepts.
+# After the bootstrap, restore Enforcing and verify Suricata still works.
+if command -v getenforce >/dev/null 2>&1; then
+    SELINUX_STATE=$(getenforce)
+    log "SELinux state: $SELINUX_STATE"
+    if [ "$SELINUX_STATE" = "Enforcing" ]; then
+        log "SELinux is Enforcing — bootstrapping in Permissive to seed runtime contexts"
+        setenforce 0
+        systemctl restart suricata 2>/dev/null || systemctl start suricata
+        sleep 8
+        # Verify Suricata is actually capturing under Permissive
+        if [ -s /var/log/suricata/eve.json ]; then
+            log "Bootstrap successful — eve.json populated"
+        else
+            log "WARNING: eve.json still empty after Permissive bootstrap; check suricata.log"
+        fi
+        # Restore Enforcing — Suricata's runtime files now have correct contexts
+        setenforce 1
+        log "SELinux restored to Enforcing — Suricata should remain functional"
+        # Verify Suricata didn't die on Enforcing transition
+        sleep 3
+        if systemctl is-active suricata >/dev/null 2>&1; then
+            log "Suricata still active under Enforcing"
+        else
+            log "WARNING: Suricata died on Enforcing transition; falling back to Permissive"
+            sed -i 's|^SELINUX=enforcing|SELINUX=permissive|' /etc/selinux/config 2>/dev/null
+            setenforce 0
+            systemctl restart suricata
+            log "Set SELinux to Permissive persistently as fallback"
+        fi
+    fi
+fi
 
 log "SOURCE_BUILD_DONE"
 """

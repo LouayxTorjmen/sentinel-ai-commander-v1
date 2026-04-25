@@ -184,6 +184,31 @@ PYEOF
         chown root:wazuh /var/ossec/etc/ossec.conf 2>/dev/null || chown root:ossec /var/ossec/etc/ossec.conf 2>/dev/null || true
         chmod 640 /var/ossec/etc/ossec.conf
         rm -f /tmp/ossec_new.conf
+
+        # If the host runs Suricata (attacker VMs, or victims with local NIDS),
+        # the template doesn't include the <localfile> for eve.json because
+        # most victim hosts don't run Suricata locally. Detect + inject
+        # idempotently so deploy doesn't wipe out Suricata integration set up
+        # by enroll.py's integrate_suricata_with_wazuh().
+        if [ -f /var/log/suricata/eve.json ] && ! grep -q 'suricata/eve.json' /var/ossec/etc/ossec.conf; then
+            echo '  Suricata eve.json detected — adding <localfile> integration'
+            # Splice the block before </ossec_config>
+            head -n -1 /var/ossec/etc/ossec.conf > /tmp/ossec.merged
+            cat >> /tmp/ossec.merged << 'SURICATA_LOCALFILE_EOF'
+
+  <!-- Suricata NIDS alerts (added by deploy_agent_configs.sh) -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/suricata/eve.json</location>
+  </localfile>
+
+</ossec_config>
+SURICATA_LOCALFILE_EOF
+            mv /tmp/ossec.merged /var/ossec/etc/ossec.conf
+            chown root:wazuh /var/ossec/etc/ossec.conf 2>/dev/null || chown root:ossec /var/ossec/etc/ossec.conf 2>/dev/null || true
+            chmod 640 /var/ossec/etc/ossec.conf
+        fi
+
         systemctl enable wazuh-agent >/dev/null 2>&1 || true
         systemctl start wazuh-agent
         sleep 5
@@ -191,7 +216,8 @@ PYEOF
         echo \"  Service: \$STATUS\"
         SC=\$(grep -c 'syscollector' /var/ossec/etc/ossec.conf)
         SCA=\$(grep -c '<sca>' /var/ossec/etc/ossec.conf)
-        echo \"  syscollector mentions: \$SC | sca: \$SCA\"
+        SURI=\$(grep -c 'suricata/eve.json' /var/ossec/etc/ossec.conf)
+        echo \"  syscollector: \$SC | sca: \$SCA | suricata: \$SURI\"
     "
     if [ $? -eq 0 ]; then
         ok "  $IP done"
