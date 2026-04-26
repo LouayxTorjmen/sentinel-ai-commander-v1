@@ -12,6 +12,7 @@ from ai_agents.database.db_manager import init_db, get_db
 from ai_agents.database.models import Incident
 from ai_agents.agents.orchestrator.orchestrator import OrchestratorAgent
 from ai_agents.agents.wazuh_consumer.wazuh_alert_consumer import consume_wazuh_alerts
+from ai_agents.agents.wazuh_consumer.alert_dispatcher import dispatch_alerts
 from ai_agents.agents.network_scanner.network_scanner import NetworkScannerAgent
 from ai_agents.agents.wazuh_suricata.wazuh_suricata_agent import WazuhSuricataAgent
 from ai_agents.integrations.redis_manager import get_redis
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
     logger.info("sentinel_ai.startup")
     init_db()
     _consumer_task = asyncio.create_task(consume_wazuh_alerts())
+    _dispatcher_task = asyncio.create_task(dispatch_alerts(orchestrator))
     # Pull Ollama model in background
     asyncio.create_task(_ensure_ollama_model())
     # Start auto-discovery loop
