@@ -443,7 +443,28 @@ class RAGRetriever:
                     "mitre": src.get("rule", {}).get("mitre", {}),
                     "full_log": (src.get("full_log", "") or "")[:200],
                 })
-            return results
+            # Dedupe by signature so the seed shows DIVERSE alert types,
+            # not N copies of whichever fired most recently. Without this,
+            # a tight burst of one signature (e.g. nmap fingerprint at port
+            # 22) crowds out the diverse ET SCAN MSSQL/MySQL/PostgreSQL
+            # alerts that carry the OTHER dest_ports - LLM then answers
+            # "port 22" because that's all it sees.
+            seen_keys = set()
+            deduped = []
+            for r in results:
+                key = r.get("suricata_signature") or r.get("rule_description") or r.get("rule_id") or "?"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                deduped.append(r)
+                if len(deduped) >= limit:
+                    break
+            # If dedup left us with fewer than 3 alerts (very narrow result
+            # set), fall back to the original list to avoid starving the
+            # LLM context.
+            if len(deduped) < 3 and len(results) >= 3:
+                return results[:limit]
+            return deduped
         except Exception as e:
             logger.warning("rag.wazuh_search_failed: %s", e)
             return []

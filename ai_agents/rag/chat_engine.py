@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import dspy
 
 from ai_agents.rag.retriever import RAGRetriever
+from ai_agents.rag import agent_chat
 from ai_agents.llm.fallback import get_lm, get_llm_provider
 from ai_agents.database.db_manager import get_db
 from ai_agents.database.models import ChatSession, ChatMessage
@@ -214,7 +215,22 @@ class ChatEngine:
         self._save_message(session_id, "user", question)
 
         # Retrieve context from all data sources
-        context = self._retriever.retrieve(question, top_k=8)
+        # Skip RAG retrieval when agentic chat is on - LLM should
+        # call tools to gather what it actually needs, instead of being
+        # biased by an 8-doc recency-sorted seed.
+        if agent_chat.is_enabled():
+            context = {
+                "wazuh_alerts": [],
+                "archives": [],
+                "monitoring": [],
+                "stats": {},
+                "incidents": [],
+                "correlated": [],
+                "suricata_alerts": [],
+                "agent_activity": [],
+            }
+        else:
+            context = self._retriever.retrieve(question, top_k=8)
         context_str = self._format_context(context)
 
         # Build conversation context
@@ -238,12 +254,41 @@ class ChatEngine:
         # Generate answer
         try:
             self._ensure_chain()
-            with dspy.context(lm=lm):
-                result = self._chain(
+            agentic_meta = None
+            if agent_chat.is_enabled():
+                # Agentic ReAct path: LLM gets seed context + tools and may
+                # iteratively call tools before producing its final answer.
+                agentic_result = agent_chat.run_agentic_chat(
                     question=question,
-                    context=context_str,
+                    seed_context=context_str,
                     conversation_summary=summary_context,
+                    lm=lm,
                 )
+                # Build a result-shaped object matching what self._chain
+                # returns so the rest of this method works unchanged.
+                class _AnsObj:
+                    pass
+                result = _AnsObj()
+                result.answer = agentic_result["answer"]
+                result.confidence = "high" if not agentic_result.get("hit_iteration_limit") else "medium"
+                # Build sources_used from the tool calls actually made
+                tool_names = [c["name"] for c in agentic_result.get("tool_calls", [])]
+                if tool_names:
+                    result.sources_used = ", ".join(set(tool_names))
+                else:
+                    result.sources_used = "rag_seed"
+                agentic_meta = {
+                    "tool_calls": agentic_result.get("tool_calls", []),
+                    "iterations": agentic_result.get("iterations", 0),
+                    "hit_iteration_limit": agentic_result.get("hit_iteration_limit", False),
+                }
+            else:
+                with dspy.context(lm=lm):
+                    result = self._chain(
+                        question=question,
+                        context=context_str,
+                        conversation_summary=summary_context,
+                    )
             provider = get_llm_provider()
 
             # Build clickable references from retrieved docs
@@ -266,6 +311,8 @@ class ChatEngine:
                 },
                 "references": references,
             }
+            if agentic_meta is not None:
+                answer_data["agentic"] = agentic_meta
 
             # Save assistant message
             self._save_message(
