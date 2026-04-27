@@ -352,6 +352,287 @@ def get_alert(doc_id: str, doc_index: str) -> Dict[str, Any]:
     return data.get("_source", {})
 
 
+# ─── Tool: get_incidents ──────────────────────────────────────────────
+
+
+def get_incidents(
+    severity: Optional[str] = None,
+    status: Optional[str] = None,
+    time_window: str = "7d",
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """List incidents triaged by the orchestrator from the Postgres DB.
+
+    The orchestrator is fired automatically on every level>=5 alert and
+    runs log_analyzer (classify + MITRE) -> threat_intel (enrich) ->
+    cve_scanner (NVD lookup) -> incident_responder (DB write) ->
+    ansible_dispatch (playbook routing). Each run produces an Incident
+    with severity, alert_type, mitre_techniques, analysis paragraph,
+    recommended_action, and dispatch decision.
+
+    Use this for questions like 'what incidents have we had today',
+    'what did the system find about X', 'show high-severity incidents
+    from this week', 'what playbooks were dispatched'.
+
+    severity: 'low' / 'medium' / 'high' / 'critical' (None = all)
+    status: 'open' / 'analyzing' / 'resolved' (None = all)
+    time_window: OpenSearch-style date math ('7d', '24h', '30d')
+    """
+    from datetime import datetime, timedelta
+    from ai_agents.database.db_manager import get_db
+    from ai_agents.database.models import Incident
+
+    # Parse time_window into a timedelta
+    try:
+        unit = time_window[-1].lower()
+        n = int(time_window[:-1])
+        delta = {"m": timedelta(minutes=n), "h": timedelta(hours=n),
+                 "d": timedelta(days=n)}.get(unit, timedelta(days=7))
+    except (ValueError, IndexError):
+        delta = timedelta(days=7)
+    cutoff = datetime.utcnow() - delta
+
+    try:
+        with get_db() as db:
+            q = db.query(Incident).filter(Incident.created_at >= cutoff)
+            if severity:
+                q = q.filter(Incident.severity == severity.lower())
+            if status:
+                q = q.filter(Incident.status == status.lower())
+            q = q.order_by(Incident.created_at.desc()).limit(min(limit, 100))
+            rows = q.all()
+            incidents = []
+            for r in rows:
+                incidents.append({
+                    "id": r.id,
+                    "wazuh_alert_id": r.wazuh_alert_id,
+                    "rule_id": r.rule_id,
+                    "rule_description": r.rule_description,
+                    "severity": r.severity,
+                    "status": r.status,
+                    "source_ip": r.source_ip,
+                    "dest_ip": r.dest_ip,
+                    "mitre_techniques": r.mitre_techniques or [],
+                    "analysis": (r.analysis or "")[:500],
+                    "recommended_action": r.recommended_action,
+                    "confidence_score": r.confidence_score,
+                    "playbook_executed": r.playbook_executed,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                })
+            return {"total": len(incidents), "incidents": incidents}
+    except Exception as exc:
+        logger.warning("agent_tools.get_incidents.failed: %s", exc)
+        return {"total": 0, "incidents": [], "error": str(exc)}
+
+
+# ─── Tool: get_incident_details ───────────────────────────────────────
+
+
+def get_incident_details(incident_id: str) -> Dict[str, Any]:
+    """Get the full record for one specific incident by ID.
+
+    Returns the complete Incident dict including the raw alert_data,
+    full analysis text, and playbook execution result. Use this when
+    the LLM has an incident_id from get_incidents and needs to drill in.
+    """
+    from ai_agents.database.db_manager import get_db
+    from ai_agents.database.models import Incident
+    if not incident_id:
+        return {"error": "incident_id required"}
+    try:
+        with get_db() as db:
+            r = db.query(Incident).filter(Incident.id == incident_id).first()
+            if not r:
+                return {"error": f"no incident with id={incident_id}"}
+            return {
+                "id": r.id,
+                "wazuh_alert_id": r.wazuh_alert_id,
+                "rule_id": r.rule_id,
+                "rule_description": r.rule_description,
+                "severity": r.severity,
+                "status": r.status,
+                "source_ip": r.source_ip,
+                "dest_ip": r.dest_ip,
+                "mitre_techniques": r.mitre_techniques or [],
+                "alert_data": r.alert_data or {},
+                "analysis": r.analysis,
+                "recommended_action": r.recommended_action,
+                "confidence_score": r.confidence_score,
+                "playbook_executed": r.playbook_executed,
+                "playbook_result": r.playbook_result,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
+            }
+    except Exception as exc:
+        logger.warning("agent_tools.get_incident_details.failed: %s", exc)
+        return {"error": str(exc)}
+
+
+# ─── Tool: search_archives ────────────────────────────────────────────
+
+
+def search_archives(
+    query: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    src_ip: Optional[str] = None,
+    dst_ip: Optional[str] = None,
+    time_window: str = "24h",
+    limit: int = 30,
+) -> Dict[str, Any]:
+    """Search the Wazuh archives index for raw events that did NOT
+    escalate to alerts.
+
+    The archives index (wazuh-archives-4.x-*) contains ALL events seen
+    by the manager, including raw Suricata flows, pfSense syslog,
+    decoded events that didn't match any rule. ~2M docs per day so
+    filter aggressively. Use this for 'did we see traffic from IP X',
+    'what flows touched port Y', 'is there evidence of activity that
+    didn't fire an alert'.
+
+    query: free-text against full_log (text field, supports tokenization)
+    agent_name, src_ip, dst_ip: exact filters
+    time_window: '30m', '24h', '7d' etc
+    """
+    body: Dict[str, Any] = {
+        "size": min(max(int(limit), 1), 100),
+        "sort": [{"timestamp": {"order": "desc"}}],
+        "query": {"bool": {"must": [
+            {"range": {"timestamp": {"gte": f"now-{time_window}"}}},
+        ]}},
+    }
+    must = body["query"]["bool"]["must"]
+    if agent_name:
+        must.append({"match_phrase": {"agent.name": agent_name}})
+    if src_ip:
+        must.append({"bool": {"should": [
+            {"term": {"data.src_ip": src_ip}},
+            {"term": {"data.srcip": src_ip}},
+        ], "minimum_should_match": 1}})
+    if dst_ip:
+        must.append({"bool": {"should": [
+            {"term": {"data.dest_ip": dst_ip}},
+            {"term": {"data.dstip": dst_ip}},
+        ], "minimum_should_match": 1}})
+    if query:
+        must.append({"match": {"full_log": query}})
+
+    try:
+        data = _get_client()._indexer_request(
+            "POST", "/wazuh-archives-4.x-*/_search",
+            json=body,
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception as exc:
+        logger.warning("agent_tools.search_archives.failed: %s", exc)
+        return {"total": 0, "events": [], "error": str(exc)}
+
+    hits = data.get("hits", {})
+    total = hits.get("total", {}).get("value", 0)
+    events = []
+    for h in hits.get("hits", []):
+        src = h.get("_source", {})
+        d = src.get("data", {}) or {}
+        events.append({
+            "timestamp": src.get("timestamp") or src.get("@timestamp"),
+            "agent_name": (src.get("agent", {}) or {}).get("name"),
+            "src_ip": d.get("src_ip") or d.get("srcip"),
+            "dst_ip": d.get("dest_ip") or d.get("dstip"),
+            "src_port": d.get("src_port"),
+            "dest_port": d.get("dest_port"),
+            "proto": d.get("proto"),
+            "event_type": d.get("event_type"),
+            "decoder": (src.get("decoder", {}) or {}).get("name"),
+            "full_log_preview": (src.get("full_log") or "")[:200],
+        })
+    return {"total": total, "returned": len(events), "events": events}
+
+
+# ─── Tool: agent_inventory ────────────────────────────────────────────
+
+
+_INVENTORY_KINDS = {
+    "packages", "services", "processes", "ports",
+    "users", "groups", "networks", "interfaces",
+    "hardware", "hotfixes", "protocols", "system",
+    "browser-extensions",
+}
+
+
+def agent_inventory(
+    agent_name: str,
+    kind: str = "packages",
+    contains: Optional[str] = None,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """Query agent system inventory (syscollector data).
+
+    Wazuh agents periodically report their system state - installed
+    packages, running processes, listening ports, users, groups,
+    network interfaces, hardware, etc. Use this for 'what's installed
+    on agent X', 'what processes are running', 'what ports are open'.
+
+    agent_name: exact agent name (e.g. 'kali-agent-1', 'ubuntu-agent-2')
+    kind: one of packages, services, processes, ports, users, groups,
+          networks, interfaces, hardware, hotfixes, protocols, system,
+          browser-extensions
+    contains: optional case-insensitive substring filter against the
+              kind-specific name field (package.name, service.name, etc).
+    limit: max items to return (1-200)
+
+    Note: despite the index naming pattern 'wazuh-states-inventory-
+    {kind}-<suffix>', all agents' data lives in the same per-kind index
+    in Wazuh 4.x; routing is by the agent.name field inside docs.
+    """
+    if kind not in _INVENTORY_KINDS:
+        return {"error": f"invalid kind '{kind}'. Allowed: {sorted(_INVENTORY_KINDS)}"}
+    if not agent_name:
+        return {"error": "agent_name required"}
+
+    body: Dict[str, Any] = {
+        "size": min(max(int(limit), 1), 200),
+        "query": {"bool": {"must": [
+            {"match_phrase": {"agent.name": agent_name}},
+        ]}},
+    }
+    if contains:
+        # Match against the most likely name field for this kind. We
+        # add a few fallbacks in a should clause to widen coverage.
+        kw = contains.lower()
+        body["query"]["bool"]["must"].append({"bool": {"should": [
+            {"wildcard": {"package.name": f"*{kw}*"}},
+            {"wildcard": {"service.name": f"*{kw}*"}},
+            {"wildcard": {"process.name": f"*{kw}*"}},
+            {"wildcard": {"user.name": f"*{kw}*"}},
+            {"wildcard": {"group.name": f"*{kw}*"}},
+            {"wildcard": {"interface.name": f"*{kw}*"}},
+        ], "minimum_should_match": 1}})
+
+    # Try the per-cluster index pattern (wazuh.manager suffix is a
+    # cluster-name convention; doc routing is by agent.name field).
+    index_pattern = f"/wazuh-states-inventory-{kind}-*/_search"
+    try:
+        data = _get_client()._indexer_request(
+            "POST", index_pattern,
+            json=body,
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception as exc:
+        logger.warning("agent_tools.agent_inventory.failed: %s", exc)
+        return {"total": 0, "items": [], "error": str(exc)}
+
+    hits = data.get("hits", {})
+    total = hits.get("total", {}).get("value", 0)
+    items = []
+    for h in hits.get("hits", []):
+        src = h.get("_source", {})
+        # Strip the wazuh metadata block - LLM doesn't need cluster info
+        clean = {k: v for k, v in src.items() if k != "wazuh"}
+        items.append(clean)
+    return {"total": total, "returned": len(items), "kind": kind,
+            "agent_name": agent_name, "items": items}
+
+
 # ─── Registry ─────────────────────────────────────────────────────────
 
 
@@ -361,6 +642,10 @@ TOOLS: Dict[str, Any] = {
     "top_signatures": top_signatures,
     "list_agents": list_agents,
     "get_alert": get_alert,
+    "get_incidents": get_incidents,
+    "get_incident_details": get_incident_details,
+    "search_archives": search_archives,
+    "agent_inventory": agent_inventory,
 }
 
 
