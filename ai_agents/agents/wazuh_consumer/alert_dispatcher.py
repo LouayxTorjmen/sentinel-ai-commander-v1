@@ -26,6 +26,95 @@ ALERT_CHANNEL = "sentinel:alerts"
 # consumer change can't accidentally flood the orchestrator.
 DISPATCH_MIN_LEVEL = int(os.getenv("DISPATCH_MIN_LEVEL", "5"))
 
+# Per (rule_id, agent_name) dedup window. The same rule firing on the
+# same agent within this many seconds will only trigger orchestrator
+# once. Defends against burst floods (e.g. nmap scan firing 30
+# ET SCAN MSSQL alerts in 5 seconds — orchestrator only needs to see
+# one to triage).
+DISPATCH_DEDUP_WINDOW_S = float(os.getenv("DISPATCH_DEDUP_WINDOW_S", "60"))
+
+# Set to "1" to bypass the noise filter (e.g. for testing all rules)
+DISABLE_NOISE_FILTER = os.getenv("DISPATCH_DISABLE_NOISE_FILTER", "0") == "1"
+
+# Rules with no SOC value on this lab — desktop / dpkg / systemd noise
+HARD_SKIP_RULES = {
+    40704,   # systemd unit failure (desktop app crashes)
+    2902,    # dpkg package installed (workstation noise)
+    2904,    # dpkg package removed (workstation noise)
+}
+
+# FIM rules that need path-based filtering (real changes still pass)
+_FIM_RULES = {550, 553, 554}
+
+# Substring patterns for FIM paths that are KNOWN noise. If a FIM
+# alert's syscheck.path contains any of these, skip dispatch.
+_FIM_NOISE_PATTERNS = (
+    # User desktop / session state
+    "/.config/", "/.local/", "/.cache/", "/.xsession-errors",
+    "/.gvfs-metadata/", "/.mozilla/", "/.thunderbird/",
+    "/.dbus/", "/run/user/",
+    # Snap apps churn
+    "/snap/",
+    # Print spooler + ansible runs
+    "/etc/cups/", "/tmp/ansible_", "/tmp/.X", "/tmp/systemd-",
+    # Package manager tempdirs and metadata (dnf/yum/apt/rpm)
+    "/tmp/tmpdir.", "/repodata/",
+    "/var/cache/apt/", "/var/cache/dnf/", "/var/cache/yum/",
+    "/var/lib/dnf/", "/var/lib/apt/", "/var/lib/rpm/",
+    # systemd transient drop-ins
+    "/run/systemd/",
+)
+
+# Tracks (rule_id, agent_name) -> last dispatch timestamp (monotonic)
+_recent_dispatches: dict = {}
+
+
+def _is_fim_noise(alert: dict) -> bool:
+    """Return True if a FIM alert path matches a known noise pattern."""
+    syscheck = alert.get("syscheck") or alert.get("data", {}).get("syscheck") or {}
+    path = (syscheck.get("path") or "").lower()
+    if not path:
+        return False
+    return any(pat in path for pat in _FIM_NOISE_PATTERNS)
+
+
+def _should_dispatch(alert: dict, level: int) -> tuple[bool, str]:
+    """Decide whether an alert should reach the orchestrator.
+
+    Returns (allow, reason). reason is empty when allowed; populated
+    with a short tag when skipped (for logging).
+    """
+    rule = alert.get("rule") or {}
+    try:
+        rule_id = int(rule.get("id", 0))
+    except (TypeError, ValueError):
+        rule_id = 0
+    agent_name = (alert.get("agent") or {}).get("name") or ""
+
+    if not DISABLE_NOISE_FILTER:
+        if rule_id in HARD_SKIP_RULES:
+            return False, f"hard_skip_rule_{rule_id}"
+        if rule_id in _FIM_RULES and _is_fim_noise(alert):
+            return False, "fim_path_noise"
+
+    # Per (rule_id, agent_name) dedup
+    import time
+    key = (rule_id, agent_name)
+    now = time.monotonic()
+    last = _recent_dispatches.get(key)
+    if last is not None and now - last < DISPATCH_DEDUP_WINDOW_S:
+        return False, "dedup"
+    _recent_dispatches[key] = now
+
+    # Periodic cleanup of stale entries to avoid unbounded memory growth
+    if len(_recent_dispatches) > 5000:
+        cutoff = now - DISPATCH_DEDUP_WINDOW_S * 2
+        _recent_dispatches.clear()  # cheap reset; data is just timestamps
+        _recent_dispatches[key] = now
+        del cutoff
+
+    return True, ""
+
 
 def _decode(raw: Any) -> dict | None:
     """Decode a redis pubsub payload into an alert dict, or None on failure."""
@@ -82,6 +171,14 @@ async def dispatch_alerts(orchestrator) -> None:
             if level < DISPATCH_MIN_LEVEL:
                 logger.debug("alert_dispatcher.skip_low_level",
                              level=level, min_level=DISPATCH_MIN_LEVEL)
+                continue
+
+            allow, reason = _should_dispatch(alert, level)
+            if not allow:
+                logger.debug("alert_dispatcher.skip",
+                             reason=reason,
+                             rule_id=(alert.get("rule") or {}).get("id"),
+                             agent=(alert.get("agent") or {}).get("name"))
                 continue
 
             try:
