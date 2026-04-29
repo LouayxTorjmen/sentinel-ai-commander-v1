@@ -27,6 +27,10 @@ class LLMProvider:
 
         self._ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://sentinel-ollama:11434")
         self._ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+
+        # Cerebras (top-priority provider when key is configured)
+        self._cerebras_api_key = os.getenv("CEREBRAS_API_KEY", "")
+        self._cerebras_model = os.getenv("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
         
         self._temperature = float(os.getenv("LLM_TEMPERATURE", "0"))
         self._max_tokens = int(os.getenv("LLM_MAX_TOKENS", "4096"))
@@ -35,6 +39,7 @@ class LLMProvider:
         self._current_provider = "groq"
         self._last_groq_failure = 0.0
         self._last_gemini_failure = 0.0
+        self._last_cerebras_failure = 0.0
         self._cooldown = 60
 
     def _groq_available(self) -> bool:
@@ -46,6 +51,17 @@ class LLMProvider:
             return resp.status_code == 200
         except Exception:
             self._last_groq_failure = time.monotonic()
+            return False
+
+    def _cerebras_available(self) -> bool:
+        if not self._cerebras_api_key: return False
+        if time.monotonic() - self._last_cerebras_failure < self._cooldown: return False
+        try:
+            resp = requests.get("https://api.cerebras.ai/v1/models",
+                headers={"Authorization": f"Bearer {self._cerebras_api_key}"}, timeout=5)
+            return resp.status_code == 200
+        except Exception:
+            self._last_cerebras_failure = time.monotonic()
             return False
 
     def _gemini_available(self) -> bool:
@@ -71,12 +87,31 @@ class LLMProvider:
             return False
 
     def get_lm(self, preferred: str = None) -> dspy.LM:
+        if preferred == 'cerebras' and self._cerebras_available():
+            self._current_provider = 'cerebras'
+            return dspy.LM(
+                model=f'cerebras/{self._cerebras_model}',
+                api_key=self._cerebras_api_key,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
         if preferred == 'gemini' and self._gemini_available():
             self._current_provider = 'gemini'
             return dspy.LM(model=f'gemini/{self._gemini_model}', api_key=self._gemini_api_key, temperature=self._temperature, max_tokens=self._max_tokens)
         if preferred == 'groq' and self._groq_available():
             self._current_provider = 'groq'
             return dspy.LM(model=f'groq/{self._groq_model}', api_key=self._groq_api_key, temperature=self._temperature, max_tokens=self._max_tokens)
+        if preferred == 'ollama' and self._ollama_available():
+            self._current_provider = 'ollama'
+            return dspy.LM(model=f'ollama_chat/{self._ollama_model}', api_base=self._ollama_base_url, temperature=self._temperature, max_tokens=min(self._max_tokens, 2048))
+        if self._cerebras_available():
+            self._current_provider = "cerebras"
+            return dspy.LM(
+                model=f"cerebras/{self._cerebras_model}",
+                api_key=self._cerebras_api_key,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
         if self._groq_available():
             self._current_provider = "groq"
             return dspy.LM(model=f"groq/{self._groq_model}", api_key=self._groq_api_key, temperature=self._temperature, max_tokens=self._max_tokens)
@@ -101,6 +136,7 @@ class LLMProvider:
             "current_provider": self._current_provider,
             "groq_available": self._groq_available(),
             "gemini_available": self._gemini_available(),
+            "cerebras_available": self._cerebras_available(),
             "ollama_available": self._ollama_available() if self._fallback_enabled else False,
             "fallback_enabled": self._fallback_enabled,
         }

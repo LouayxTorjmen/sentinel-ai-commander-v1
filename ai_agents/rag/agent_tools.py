@@ -71,6 +71,7 @@ def _alert_to_summary(src: Dict[str, Any]) -> Dict[str, Any]:
 def search_alerts(
     agent_name: Optional[str] = None,
     signature_contains: Optional[str] = None,
+    path_contains: Optional[str] = None,
     rule_groups: Optional[List[str]] = None,
     src_ip: Optional[str] = None,
     dst_ip: Optional[str] = None,
@@ -88,6 +89,9 @@ def search_alerts(
 
     Filters combine with AND. signature_contains is a case-insensitive
     substring match against rule.description AND data.alert.signature.
+    path_contains is a case-insensitive substring match against
+    syscheck.path - use this for file integrity questions about a
+    specific filename or directory.
     rule_groups matches if ANY of the given groups is on the alert.
     time_window is OpenSearch date math: '30m', '2h', '24h', '7d', '30d'.
 
@@ -129,14 +133,24 @@ def search_alerts(
         ], "minimum_should_match": 1}})
     if signature_contains:
         kw = signature_contains.strip()
-        kw_lower = kw.lower()
-        kw_upper = kw.upper()
+        # Single case_insensitive wildcard - matches mixed-case stored
+        # values like "SQLi" regardless of how the LLM phrased the query.
+        # The match-query against full_log handles tokenized text fields.
         must.append({"bool": {"should": [
             {"match": {"full_log": kw}},
-            {"wildcard": {"rule.description": f"*{kw_lower}*"}},
-            {"wildcard": {"rule.description": f"*{kw_upper}*"}},
-            {"wildcard": {"data.alert.signature": f"*{kw_lower}*"}},
-            {"wildcard": {"data.alert.signature": f"*{kw_upper}*"}},
+            {"wildcard": {"rule.description": {"value": f"*{kw}*", "case_insensitive": True}}},
+            {"wildcard": {"data.alert.signature": {"value": f"*{kw}*", "case_insensitive": True}}},
+        ], "minimum_should_match": 1}})
+
+    if path_contains:
+        # FIM file path filter. syscheck.path is keyword-mapped so we
+        # use a case-insensitive wildcard. full_log also gets a match
+        # query as a backup for events that don't have syscheck.path
+        # populated.
+        pkw = path_contains.strip()
+        must.append({"bool": {"should": [
+            {"wildcard": {"syscheck.path": {"value": f"*{pkw}*", "case_insensitive": True}}},
+            {"match": {"full_log": pkw}},
         ], "minimum_should_match": 1}})
 
     try:
@@ -151,7 +165,14 @@ def search_alerts(
 
     hits = data.get("hits", {})
     total = hits.get("total", {}).get("value", 0)
-    alerts = [_alert_to_summary(h.get("_source", {})) for h in hits.get("hits", [])]
+    alerts = []
+    for h in hits.get("hits", []):
+        summary = _alert_to_summary(h.get("_source", {}))
+        # Pass through OpenSearch metadata so the UI's document viewer
+        # can fetch the original document on click.
+        summary["_id"] = h.get("_id")
+        summary["_index"] = h.get("_index")
+        alerts.append(summary)
     result = {"total": total, "returned": len(alerts), "alerts": alerts}
     # Aggregated digest — the LLM should prefer this over the raw alerts
     # list for "which ports / agents / signatures" questions. Keeps the
@@ -197,6 +218,53 @@ def search_alerts(
         if not hints:
             hints.append("filters may be too restrictive — relax one and retry")
         result["hint"] = "; ".join(hints)
+    # Auto-fallback: if no alerts matched, look in archives with the
+    # same useful filters. Many SOC questions ("any X events?") are
+    # ambiguous to small LLMs because they don't know which index a
+    # given event type lives in. Hiding that distinction inside the
+    # tool eliminates a whole class of wrong-tool failures.
+    if result.get("total", 0) == 0:
+        try:
+            archive_query_parts = []
+            if signature_contains:
+                archive_query_parts.append(signature_contains)
+            archive_result = search_archives(
+                query=" ".join(archive_query_parts) if archive_query_parts else None,
+                agent_name=agent_name,
+                src_ip=src_ip,
+                dst_ip=dst_ip,
+                time_window=time_window,
+                limit=min(limit, 30),
+            )
+            if archive_result.get("total", 0) > 0:
+                logger.info(
+                    "search_alerts.fallback_to_archives total=%d filters=%s",
+                    archive_result.get("total", 0),
+                    {
+                        "signature_contains": signature_contains,
+                        "agent_name": agent_name,
+                        "src_ip": src_ip,
+                        "time_window": time_window,
+                    },
+                )
+                # Reshape archive result to look like an alerts result
+                # so the LLM doesn't need to know it came from a
+                # different index. Tag the source for transparency.
+                events = archive_result.get("events", []) or archive_result.get("alerts", [])
+                return {
+                    "total": archive_result.get("total", 0),
+                    "returned": archive_result.get("returned", len(events)),
+                    "alerts": events,
+                    "source": "archives",
+                    "note": (
+                        "No matching alerts (events that escalated to a Wazuh "
+                        "rule). These results come from wazuh-archives-* — raw "
+                        "events that did not trigger an alert."
+                    ),
+                }
+        except Exception as exc:
+            logger.warning("search_alerts.archive_fallback_failed: %s", exc)
+
     return result
 
 
@@ -666,11 +734,234 @@ def get_tool_descriptions() -> str:
     return "\n".join(lines)
 
 
+_SEVERITY_NAME_TO_LEVEL = {
+    # Wazuh rule.level scale 0-15. Common LLM strings -> rough numeric
+    "info": 0, "informational": 0, "debug": 0,
+    "low": 3,
+    "medium": 5, "med": 5, "warning": 5, "warn": 5,
+    "high": 7,
+    "critical": 10, "crit": 10, "severe": 10,
+    "fatal": 12,
+}
+
+
+def _coerce_int(value, field_name):
+    """Try to coerce value to int, with helpful conversions for common
+    LLM-isms like \"INFO\" -> 0, \"high\" -> 7, \"100\" -> 100.
+    Returns the coerced int, or the original value if coercion fails
+    (so the original tool call error surfaces unchanged).
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+            return int(s)
+        mapped = _SEVERITY_NAME_TO_LEVEL.get(s.lower())
+        if mapped is not None:
+            return mapped
+    return value
+
+
+def _coerce_time_window(value):
+    """LLMs sometimes send '7d-1h' or '7 days'. Normalize to OpenSearch
+    date-math like '7d', '24h', '30m'. Falls back to original on no
+    match so OpenSearch's own parser will surface a real error.
+    """
+    if not isinstance(value, str):
+        return value
+    import re as _re
+    s = value.strip().lower().replace(" ", "")
+    # Already valid: '24h', '7d', '30m', '30s'
+    if _re.fullmatch(r"\d+[smhdwM]", s):
+        return s
+    # 'Nd-Xh' or 'Nd+Xh' — keep just the first chunk
+    m = _re.match(r"(\d+[smhdwM])[-+]", s)
+    if m:
+        return m.group(1)
+    # 'N days', 'N hours', etc.
+    m = _re.fullmatch(r"(\d+)\s*(s|sec|second|seconds|m|min|minute|minutes|h|hour|hours|d|day|days|w|week|weeks)", s)
+    if m:
+        n, unit = m.group(1), m.group(2)
+        unit_map = {
+            "s": "s", "sec": "s", "second": "s", "seconds": "s",
+            "m": "m", "min": "m", "minute": "m", "minutes": "m",
+            "h": "h", "hour": "h", "hours": "h",
+            "d": "d", "day": "d", "days": "d",
+            "w": "w", "week": "w", "weeks": "w",
+        }
+        return f"{n}{unit_map.get(unit, 'd')}"
+    return value
+
+
+# Per-tool arg coercion rules. Each entry is a callable that takes
+# the args dict and returns a (possibly modified) args dict, plus a
+# list of (key, before, after) tuples for logging.
+def _unwrap_schema_value(value):
+    """Mistral 7B sometimes mirrors the JSON Schema as the argument
+    value. Detect that pattern and extract the real value.
+
+    Recognized shapes:
+        {"type": "string", "value": "sql injection"}  -> "sql injection"
+        {"type": "string"}                            -> None  (no real value)
+        {"value": 100}                                -> 100
+    """
+    if not isinstance(value, dict):
+        return value
+    keys = set(value.keys())
+    # Exact schema mirror with a value
+    if "value" in keys and (keys <= {"type", "value", "description", "default", "enum"}):
+        return value["value"]
+    # Schema mirror without a value -> caller should drop the arg
+    if keys <= {"type", "description", "default", "enum"}:
+        return _SCHEMA_MIRROR_NO_VALUE
+    return value
+
+
+_SCHEMA_MIRROR_NO_VALUE = object()  # sentinel
+
+
+# Real Wazuh rule.groups we ever see in our deployment. LLMs
+# sometimes invent group names like "sql_injection" or "web_attack_sql"
+# which don't match anything. We validate against this list and drop
+# the rule_groups arg if no value is recognized.
+_KNOWN_RULE_GROUPS = {
+    "ossec", "syscheck", "syscheck_entry_modified", "syscheck_entry_added",
+    "syscheck_entry_deleted", "syscheck_file", "rootcheck", "rootkit",
+    "ids", "suricata", "scan", "attack", "trojan",
+    "authentication_failed", "authentication_success", "ssh", "sshd",
+    "web", "web_attack", "web_accesslog", "accesslog",
+    "pam", "syslog", "sudo", "audit",
+    "wazuh", "agent", "ossec_unauthorized",
+}
+
+
+def _parse_maybe_stringified_list(value):
+    """LLMs sometimes wrap lists in strings: '["a", "b"]' or
+    "['a', 'b']". Try to recover the actual list.
+    """
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return value
+    import json as _j
+    # Try strict JSON first
+    try:
+        return _j.loads(s)
+    except Exception:
+        pass
+    # Try replacing single quotes with double quotes
+    try:
+        return _j.loads(s.replace("\'", "\""))
+    except Exception:
+        pass
+    # Last resort: strip brackets and split
+    inner = s[1:-1]
+    parts = [p.strip().strip("\"\' ") for p in inner.split(",") if p.strip()]
+    return parts if parts else value
+
+
+def _coerce_search_alerts_args(args):
+    coerced = []
+
+    # Pass 1: unwrap schema-mirrored values
+    for key in list(args.keys()):
+        unwrapped = _unwrap_schema_value(args[key])
+        if unwrapped is _SCHEMA_MIRROR_NO_VALUE:
+            coerced.append((key, args[key], "<dropped:schema_mirror_no_value>"))
+            del args[key]
+        elif unwrapped != args[key]:
+            coerced.append((key, args[key], unwrapped))
+            args[key] = unwrapped
+
+    # Pass 2: drop empty-string filters (LLM sent "" instead of omitting)
+    for key in list(args.keys()):
+        v = args[key]
+        if isinstance(v, str) and v.strip() == "":
+            coerced.append((key, v, "<dropped:empty_string>"))
+            del args[key]
+
+    # Pass 3: clean rule_groups - parse stringified lists, validate, drop if all invalid
+    if "rule_groups" in args:
+        before = args["rule_groups"]
+        parsed = _parse_maybe_stringified_list(before)
+        if isinstance(parsed, list):
+            valid = [g.lower() for g in parsed if isinstance(g, str) and g.lower() in _KNOWN_RULE_GROUPS]
+            if not valid:
+                coerced.append(("rule_groups", before, "<dropped:no_valid_groups>"))
+                del args["rule_groups"]
+            elif valid != parsed:
+                coerced.append(("rule_groups", before, valid))
+                args["rule_groups"] = valid
+        else:
+            coerced.append(("rule_groups", before, "<dropped:not_a_list>"))
+            del args["rule_groups"]
+    if "min_level" in args:
+        before = args["min_level"]
+        after = _coerce_int(before, "min_level")
+        if before != after:
+            args["min_level"] = after
+            coerced.append(("min_level", before, after))
+    for key in ("limit", "dest_port"):
+        if key in args:
+            before = args[key]
+            after = _coerce_int(before, key)
+            if before != after:
+                args[key] = after
+                coerced.append((key, before, after))
+    if "time_window" in args:
+        before = args["time_window"]
+        after = _coerce_time_window(before)
+        if before != after:
+            args["time_window"] = after
+            coerced.append(("time_window", before, after))
+    # Drop None-valued args entirely so the tool's defaults take effect
+    # (LLMs sometimes send "src_ip": null which then falls into the
+    #  query body and matches nothing)
+    for k in list(args.keys()):
+        if args[k] is None:
+            del args[k]
+            coerced.append((k, "null", "<dropped>"))
+    return args, coerced
+
+
+_PER_TOOL_COERCERS = {
+    "search_alerts": _coerce_search_alerts_args,
+    "count_alerts": _coerce_search_alerts_args,
+    "top_signatures": _coerce_search_alerts_args,
+    "search_archives": _coerce_search_alerts_args,
+    "agent_inventory": _coerce_search_alerts_args,
+    "get_incidents": _coerce_search_alerts_args,
+}
+
+
 def call_tool(name: str, args: Dict[str, Any]) -> Any:
-    """Execute a tool by name with the given keyword arguments."""
+    """Execute a tool by name with the given keyword arguments.
+
+    Coerces common LLM-misformatted args (min_level=\"INFO\" -> 5,
+    limit=\"100\" -> 100, time_window=\"7d-1h\" -> \"7d\", null
+    values dropped) before invoking the underlying function.
+    """
     fn = TOOLS.get(name)
     if fn is None:
         return {"error": f"unknown tool '{name}'. Available: {list(TOOLS.keys())}"}
+
+    coercer = _PER_TOOL_COERCERS.get(name)
+    if coercer is not None and isinstance(args, dict):
+        args, coerced = coercer(dict(args))
+        if coerced:
+            logger.warning(
+                "agent_tools.call_tool.coerced name=%s changes=%s",
+                name, coerced,
+            )
+
     try:
         return fn(**args)
     except TypeError as exc:

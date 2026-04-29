@@ -109,7 +109,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 6g
     healthcheck:
       test: ["CMD-SHELL", "pidof ollama || exit 1"]
       interval: 30s
@@ -133,6 +133,8 @@ services:
       - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
       - OLLAMA_BASE_URL=http://sentinel-ollama:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
+      - CEREBRAS_MODEL=${CEREBRAS_MODEL:-qwen-3-235b-a22b-instruct-2507}
       - LLM_FALLBACK_ENABLED=${LLM_FALLBACK_ENABLED:-true}
       - WAZUH_API_URL=https://sentinel-wazuh-manager:55000
       - WAZUH_API_USER=${WAZUH_API_USER:-wazuh-wui}

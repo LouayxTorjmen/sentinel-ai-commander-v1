@@ -153,6 +153,31 @@ def run_agentic_chat(
     tool_calls is a list of {name, args, result_summary} for transparency
     in the UI / for debugging.
     """
+    # Optional Ollama-native function calling path (env-toggleable).
+    # When OLLAMA_NATIVE_TOOLS=true and the active provider is ollama,
+    # bypass DSPy + the prose parser and use Ollama's /api/chat with
+    # tools[]. Smaller models (Mistral 7B v0.3) emit structured tool
+    # calls reliably this way.
+    try:
+        from ai_agents.rag import agent_chat_native
+        # Detect provider from the lm object's model string (DSPy LM
+        # exposes .model like "ollama_chat/mistral:7b" / "groq/llama..." )
+        model_str = getattr(lm, "model", "") or ""
+        provider = "ollama" if model_str.startswith("ollama") else (
+            "groq" if model_str.startswith("groq") else (
+                "gemini" if model_str.startswith("gemini") else "unknown"
+            )
+        )
+        if agent_chat_native.is_native_enabled(provider):
+            logger.info("agent_chat.routing_to_native_ollama provider=%s model=%s", provider, model_str)
+            return agent_chat_native.run_agentic_chat_native(
+                question=question,
+                seed_context=seed_context,
+                conversation_summary=conversation_summary,
+            )
+    except Exception as exc:
+        logger.warning("agent_chat.native_path_failed_falling_back: %s", exc)
+
     chain = _get_chain()
     catalogue = agent_tools.get_tool_descriptions()
     tool_history_lines: List[str] = []
@@ -264,10 +289,24 @@ def run_agentic_chat(
         else:
             summary = "ok"
 
+        # Cap the stored result so a 200-alert query doesn't bloat the
+        # /chat response. Keep total/returned/digest/first 10 alerts.
+        result_for_ui = tool_result
+        if isinstance(tool_result, dict) and tool_result.get("alerts"):
+            result_for_ui = {
+                "total": tool_result.get("total"),
+                "returned": tool_result.get("returned"),
+                "digest": tool_result.get("digest"),
+                "alerts": tool_result.get("alerts", [])[:10],
+            }
+            if "hint" in tool_result:
+                result_for_ui["hint"] = tool_result["hint"]
+
         tool_calls.append({
             "name": tool_name,
             "args": tool_args,
             "result_summary": summary,
+            "result": result_for_ui,
         })
 
         tool_history_lines.append(

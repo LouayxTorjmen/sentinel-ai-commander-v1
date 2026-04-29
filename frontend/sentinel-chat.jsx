@@ -64,6 +64,9 @@ function Message({ msg }) {
           </div>
         )}
         <div>{msg.content}</div>
+        {msg.tool_calls && msg.tool_calls.length > 0 && (
+          <ToolCallsBlock calls={msg.tool_calls} iterations={msg.iterations} />
+        )}
         {msg.context_summary && (
           <div
             style={{
@@ -83,6 +86,71 @@ function Message({ msg }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ToolCallsBlock({ calls, iterations }) {
+  const [openIdx, setOpenIdx] = React.useState(null);
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px solid #1e293b", paddingTop: 8 }}>
+      <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6, fontWeight: 600 }}>
+        SOURCES — {calls.length} tool call{calls.length === 1 ? "" : "s"}
+        {iterations ? ` (${iterations} iteration${iterations === 1 ? "" : "s"})` : ""}
+      </div>
+      {calls.map((c, i) => {
+        const isOpen = openIdx === i;
+        return (
+          <div
+            key={i}
+            style={{
+              marginBottom: 6,
+              background: "#0f172a",
+              border: "1px solid #1e293b",
+              borderRadius: 6,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                padding: "6px 10px",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 11,
+                fontFamily: "monospace",
+                color: "#cbd5e1",
+              }}
+              onClick={() => setOpenIdx(isOpen ? null : i)}
+            >
+              <span style={{ color: "#06b6d4" }}>{isOpen ? "▼" : "▶"}</span>
+              <span style={{ color: "#10b981", fontWeight: 600 }}>{c.name}</span>
+              <span style={{ color: "#64748b" }}>
+                ({Object.entries(c.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")})
+              </span>
+              <span style={{ marginLeft: "auto", color: "#94a3b8" }}>{c.result_summary}</span>
+            </div>
+            {isOpen && (
+              <div
+                style={{
+                  borderTop: "1px solid #1e293b",
+                  padding: "8px 10px",
+                  fontFamily: "monospace",
+                  fontSize: 10.5,
+                  color: "#cbd5e1",
+                  maxHeight: 320,
+                  overflow: "auto",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {c.result ? JSON.stringify(c.result, null, 2) : "(no result data)"}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -290,6 +358,8 @@ const [loading, setLoading] = useState(false);
           confidence: data.confidence,
           sources: data.sources_used,
           context_summary: data.context_summary,
+          tool_calls: data.agentic?.tool_calls || [],
+          iterations: data.agentic?.iterations,
         },
       ]);
     } catch (err) {
@@ -412,6 +482,7 @@ const [loading, setLoading] = useState(false);
             >
               <option value="gemini">Gemini</option>
               <option value="groq">Groq</option>
+              <option value="ollama">Ollama (local)</option>
             </select>
 
             <input

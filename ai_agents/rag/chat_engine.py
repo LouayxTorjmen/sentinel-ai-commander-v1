@@ -294,6 +294,15 @@ class ChatEngine:
             # Build clickable references from retrieved docs
             references = self._extract_references(context)
 
+            # In agentic mode, also synthesize references from each
+            # tool call so the UI's ref-panel exposes the underlying
+            # data the LLM used. _extract_references runs against the
+            # RAG retriever's context which is empty in agentic mode,
+            # so without this block the UI shows no sources.
+            if agentic_meta is not None:
+                tool_refs = self._refs_from_tool_calls(agentic_meta.get("tool_calls", []))
+                references = (references or []) + tool_refs
+
             answer_data = {
                 "session_id": session_id,
                 "answer": result.answer,
@@ -341,6 +350,67 @@ class ChatEngine:
                 "sources_used": [],
                 "error": str(e),
             }
+
+    def _refs_from_tool_calls(self, tool_calls):
+        """Convert agentic tool_calls into UI ref-items.
+
+        Each tool call -> a small set of clickable references showing
+        what data the LLM actually queried. The UI's addMsg() renders
+        each ref with: source (badge), label, detail, timestamp, index, id.
+        """
+        refs = []
+        for c in tool_calls or []:
+            name = c.get("name") or "tool"
+            args = c.get("args") or {}
+            summary = c.get("result_summary") or ""
+            result = c.get("result") or {}
+
+            # Summary line: which tool was called with which args
+            args_str = ", ".join(f"{k}={v}" for k, v in args.items())
+            refs.append({
+                "source": "tool_call",
+                "label": f"{name}({args_str})",
+                "detail": summary,
+                "timestamp": "",
+                "index": "",
+                "id": "",
+            })
+
+            # If the result has alerts, expose first 5 as individual refs
+            if isinstance(result, dict):
+                alerts = result.get("alerts") or []
+                for a in alerts[:5]:
+                    sig = a.get("suricata_signature") or a.get("rule_description") or "alert"
+                    src = a.get("src_ip") or ""
+                    dst = a.get("dst_ip") or ""
+                    port = a.get("dest_port") or ""
+                    detail_bits = [s for s in [src and f"src={src}", dst and f"dst={dst}", port and f"port={port}"] if s]
+                    # Use the real OpenSearch _id and _index when available
+                    # so click-to-view in the UI fetches the actual doc
+                    # rather than failing with "document not found".
+                    refs.append({
+                        "source": "alerts",
+                        "label": (sig[:80] + ("..." if len(sig) > 80 else "")),
+                        "detail": " ".join(detail_bits) or (a.get("agent_name") or ""),
+                        "timestamp": a.get("timestamp") or "",
+                        "index": a.get("_index") or "wazuh-alerts-4.x-*",
+                        "id": a.get("_id") or "",
+                    })
+
+                # Show the digest's top signatures and the time range as refs too
+                digest = result.get("digest") or {}
+                if digest.get("time_range"):
+                    tr = digest["time_range"]
+                    refs.append({
+                        "source": "digest",
+                        "label": f"time range: {tr.get('first','?')[:19]} -> {tr.get('last','?')[:19]}",
+                        "detail": f"total={result.get('total','?')} returned={result.get('returned','?')}",
+                        "timestamp": tr.get("last") or "",
+                        "index": "",
+                        "id": "",
+                    })
+
+        return refs
 
     def _extract_references(self, context: Dict) -> list:
         """Extract clickable references from all retrieved documents."""
