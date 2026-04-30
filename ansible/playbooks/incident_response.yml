@@ -16,7 +16,7 @@
         block_duration_seconds: 1800
       when:
         - source_ip != ""
-        - block_attacker | bool
+        - block_attacker | default(true) | bool
 
     - role: notify_soc
       vars:
