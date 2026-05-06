@@ -126,6 +126,52 @@ def sshpass_test(ip, user, password):
     out, _, _ = sshpass_run(ip, user, password, "echo SSH_OK", timeout=10)
     return "SSH_OK" in (out or "")
 
+
+
+# ── Windows / PowerShell over SSH helpers ─────────────────────────────
+#
+# Windows OpenSSH + bash + PowerShell quoting is fragile. We side-step
+# it entirely by base64-encoding the PowerShell script as UTF-16-LE and
+# passing it via -EncodedCommand. That bypasses ALL escaping issues.
+
+def _ps_encode(script):
+    """Encode a PowerShell script as UTF-16-LE base64 for -EncodedCommand."""
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+def ssh_run_win(ip, ps_script, user="Administrator", timeout=120):
+    """Run a PowerShell script on a Windows host over OpenSSH."""
+    encoded = _ps_encode(ps_script)
+    ssh = (
+        f'ssh -i {SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10 '
+        f'-o BatchMode=yes {user}@{ip} '
+        f'"powershell -NoProfile -NonInteractive -EncodedCommand {encoded}"'
+    )
+    out, err, rc = run(ssh, timeout=timeout)
+    if err:
+        err_lines = [
+            l for l in err.split("\n")
+            if l.strip()
+            and not l.startswith("#< CLIXML")
+            and "<Objs " not in l
+            and "schemas.microsoft.com" not in l
+        ]
+        err = "\n".join(err_lines)
+    if out and "<Objs " in out:
+        clean_lines = []
+        for l in out.split("\n"):
+            if "<Objs " in l or l.startswith("#< CLIXML") or "schemas.microsoft.com" in l:
+                continue
+            clean_lines.append(l)
+        out = "\n".join(clean_lines).strip()
+    return out, err, rc
+
+
+def ssh_test_win(ip, user="Administrator"):
+    out, _, rc = ssh_run_win(ip, "Write-Output OK", user=user, timeout=15)
+    return rc == 0 and "OK" in out
+
+
 # ── Wazuh API ─────────────────────────────────────────────────────────
 def get_api_token(verbose=False):
     """Retrieve a Wazuh API JWT. On failure, prints a specific diagnostic
@@ -212,7 +258,14 @@ def get_existing_agent_names():
 # ── Network Scan ──────────────────────────────────────────────────────
 def scan_network():
     print(f"{Y}[*] Scanning {NETWORK} ...{RST}")
-    out, _, rc = run(f"nmap -sn {NETWORK} -oG - 2>/dev/null | grep 'Status: Up' | awk '{{print $2}}'", timeout=60)
+    # -Pn skips ICMP ping (which VMs often block) and treats all hosts
+    # as up. We then probe SSH/RDP/SMB to filter to actually-reachable
+    # hosts. Also probe 80/443 in case of pfSense, web hosts.
+    out, _, rc = run(
+        f"nmap -Pn -p 22,80,443,445,3389,8443 --open -T4 {NETWORK} -oG - 2>/dev/null "
+        f"| grep '/open/' | awk '{{print $2}}'",
+        timeout=120,
+    )
     if rc != 0:
         print(f"{R}[!] nmap not found{RST}"); return []
     hosts = [ip for ip in out.split("\n") if ip and ip not in EXCLUDE_IPS]
@@ -220,10 +273,19 @@ def scan_network():
     return hosts
 
 # ── OS Detection ──────────────────────────────────────────────────────
-def detect_os(ip):
+def detect_os(ip, user="root"):
     info = {"os": "unknown", "family": "unknown", "arch": "unknown", "pkg": "unknown", "version": ""}
-    out, _, rc = ssh_run(ip, "cat /etc/os-release 2>/dev/null; uname -m")
-    if rc != 0 or not out: return info
+    if user == "root":
+        out, _, rc = ssh_run(ip, "cat /etc/os-release 2>/dev/null; uname -m")
+        if rc == 0 and out:
+            return _parse_linux_os_release(out, info)
+    win_info = _detect_os_windows(ip, user if user != "root" else "Administrator")
+    if win_info["family"] == "windows":
+        return win_info
+    return info
+
+
+def _parse_linux_os_release(out, info):
     osrel = {}
     for line in out.split("\n"):
         if "=" in line:
@@ -250,10 +312,50 @@ def detect_os(ip):
         else: info["arch"] = "i386"
     return info
 
+
+def _detect_os_windows(ip, user):
+    info = {"os": "unknown", "family": "unknown", "arch": "unknown", "pkg": "unknown", "version": ""}
+    ps = (
+        '$ErrorActionPreference="Stop"; '
+        'Get-CimInstance Win32_OperatingSystem | '
+        'Select-Object Caption,Version,OSArchitecture | '
+        'ConvertTo-Json -Compress'
+    )
+    out, _, rc = ssh_run_win(ip, ps, user=user, timeout=20)
+    if rc != 0 or not out:
+        return info
+    try:
+        data = json.loads(out.strip().split("\n")[-1])
+    except (json.JSONDecodeError, IndexError, ValueError):
+        return info
+    caption = (data.get("Caption") or "").lower()
+    version = data.get("Version") or ""
+    arch_raw = (data.get("OSArchitecture") or "").lower()
+    info["family"] = "windows"
+    info["pkg"] = "msi"
+    info["version"] = version
+    if "server" in caption:
+        m = re.search(r"server\s+(\d+)", caption)
+        info["os"] = f"windows-server-{m.group(1)}" if m else "windows-server"
+    elif "windows 11" in caption:
+        info["os"] = "windows-11"
+    elif "windows 10" in caption:
+        info["os"] = "windows-10"
+    else:
+        info["os"] = "windows"
+    if "64" in arch_raw:
+        info["arch"] = "amd64"
+    elif "arm" in arch_raw:
+        info["arch"] = "aarch64"
+    else:
+        info["arch"] = "i386"
+    return info
+
 SUPPORTED = {
-    "debian": {"deb": ["amd64", "aarch64", "i386"]},
-    "rhel":   {"rpm": ["amd64", "aarch64"]},
-    "suse":   {"rpm": ["amd64", "aarch64"]},
+    "debian":  {"deb": ["amd64", "aarch64", "i386"]},
+    "rhel":    {"rpm": ["amd64", "aarch64"]},
+    "suse":    {"rpm": ["amd64", "aarch64"]},
+    "windows": {"msi": ["amd64"]},
 }
 
 def check_supported(info):
@@ -270,9 +372,12 @@ def get_wazuh_pkg_url(info):
     if pkg == "deb":
         deb_arch = "arm64" if arch == "aarch64" else arch
         return f"https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.4-1_{deb_arch}.deb"
-    else:
+    if pkg == "rpm":
         rpm_arch = "aarch64" if arch == "aarch64" else "x86_64"
         return f"https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.4-1.{rpm_arch}.rpm"
+    if pkg == "msi":
+        return "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.4-1.msi"
+    raise ValueError(f"Unknown package type: {pkg}")
 
 # ── SSH Setup (unchanged from v3) ─────────────────────────────────────
 def ensure_sshpass():
@@ -287,15 +392,17 @@ def ensure_pubkey():
         run(f"ssh-keygen -y -f {SSH_KEY} > {pubkey_path}")
     return open(pubkey_path).read().strip()
 
-def setup_ssh(ip):
-    print(f"\n{Y}[*] Testing SSH key auth to root@{ip}...{RST}")
+def setup_ssh(ip, user="root"):
+    print(f"\n{Y}[*] Testing SSH key auth to {user}@{ip}...{RST}")
     # Strip any stale host key for this IP — VMs get rebuilt and reuse IPs,
     # and a host-key mismatch makes OpenSSH refuse all auth methods including
     # password+kbd-interactive, producing confusing "Permission denied" errors.
     run(f"ssh-keygen -f /root/.ssh/known_hosts -R {ip} 2>/dev/null", timeout=5)
     run(f"ssh-keygen -f ~/.ssh/known_hosts -R {ip} 2>/dev/null", timeout=5)
-    if ssh_test(ip):
-        print(f"{G}[+] SSH key works for root@{ip}{RST}")
+    test_cmd = f'ssh -i {SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes {user}@{ip} "echo SSH_OK"'
+    out, _, rc = run(test_cmd, timeout=15)
+    if rc == 0 and "SSH_OK" in (out or ""):
+        print(f"{G}[+] SSH key works for {user}@{ip}{RST}")
         return True
     print(f"{Y}[!] No key-based root access to {ip}{RST}")
     print(f"    {C}1){RST} I have a regular user with sudo")
@@ -512,8 +619,10 @@ def detect_network_interface(ip):
     return select_network_interface(ip, interactive=True)
 
 # ── Deploy Wazuh ──────────────────────────────────────────────────────
-def deploy_wazuh(ip, info, agent_name):
+def deploy_wazuh(ip, info, agent_name, win_user="Administrator"):
     print(f"\n{Y}[*] Deploying Wazuh agent...{RST}")
+    if info.get("family") == "windows":
+        return _deploy_wazuh_windows(ip, info, agent_name, win_user)
 
     # Check if already running healthy
     out, _, rc = ssh_run(ip, "systemctl is-active wazuh-agent 2>/dev/null")
@@ -630,6 +739,274 @@ echo CONFIG_DONE
 
 
     return True
+
+
+
+
+# ── Phase 2B-1: Sysmon auto-install on Windows ──────────────────────────
+def _install_sysmon_windows(ip, win_user):
+    """Install Microsoft Sysmon (Sysinternals) with the SwiftOnSecurity SOC
+    config. Idempotent — skips if Sysmon64 service is already present.
+
+    Sources:
+      Sysmon:  https://download.sysinternals.com/files/Sysmon.zip
+      Config:  https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/master/sysmonconfig-export.xml
+
+    Returns True if Sysmon is running after this call (whether installed
+    by us or already there).
+    """
+    print(f"{C}    Installing Sysmon (Sysinternals + SwiftOnSecurity config)...{RST}")
+
+    # Check if already installed
+    out, _, rc = ssh_run_win(
+        ip,
+        "Get-Service Sysmon64 -ErrorAction SilentlyContinue | Select-Object -Expand Status",
+        user=win_user, timeout=15,
+    )
+    if rc == 0 and "Running" in (out or ""):
+        print(f"{G}    Sysmon already running, skipping{RST}")
+        return True
+
+    # Download + install + apply config (silent, accepts EULA)
+    install_ps = (
+        '$ErrorActionPreference = "Stop"\n'
+        '$ProgressPreference = "SilentlyContinue"\n'
+        '$tmp = "$env:TEMP\\sysmon"\n'
+        'New-Item -ItemType Directory -Force -Path $tmp | Out-Null\n'
+        'Write-Output "Downloading Sysmon.zip..."\n'
+        'Invoke-WebRequest -Uri "https://download.sysinternals.com/files/Sysmon.zip" '
+        '-OutFile "$tmp\\Sysmon.zip" -UseBasicParsing\n'
+        'Expand-Archive -Path "$tmp\\Sysmon.zip" -DestinationPath $tmp -Force\n'
+        'Write-Output "Downloading SwiftOnSecurity config..."\n'
+        'Invoke-WebRequest -Uri '
+        '"https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/master/sysmonconfig-export.xml" '
+        '-OutFile "$tmp\\sysmonconfig.xml" -UseBasicParsing\n'
+        'Write-Output "Installing Sysmon64..."\n'
+        '# -accepteula -i <config>: install + apply config in one step\n'
+        '$p = Start-Process -FilePath "$tmp\\Sysmon64.exe" '
+        '-ArgumentList "-accepteula","-i","$tmp\\sysmonconfig.xml" '
+        '-Wait -PassThru -NoNewWindow\n'
+        'Write-Output ("sysmon_install_exit=" + $p.ExitCode)\n'
+        '# Cleanup downloads\n'
+        'Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue\n'
+        '# Verify\n'
+        '$svc = Get-Service Sysmon64 -ErrorAction SilentlyContinue\n'
+        'if ($svc) { Write-Output ("sysmon_status=" + $svc.Status) }\n'
+        'else { Write-Output "sysmon_status=NOT_FOUND" }\n'
+    )
+    out, err, rc = ssh_run_win(ip, install_ps, user=win_user, timeout=180)
+    for line in (out or "").split("\n"):
+        if line.strip():
+            print(f"    {line}")
+    if "sysmon_status=Running" in (out or ""):
+        print(f"{G}    Sysmon installed and running{RST}")
+        return True
+    print(f"{Y}    [!] Sysmon install reported issues — agent will work but Sysmon channel will be empty{RST}")
+    return False
+
+
+# ── Phase 2A: Push Windows SOC template after Wazuh deploy ──────────────
+def _push_windows_soc_template(ip, win_user, agent_id):
+    """Read wazuh/config/agents/ossec_windows.conf, render the manager IP/port,
+    and write it to C:\\Program Files (x86)\\ossec-agent\\ossec.conf, then
+    restart WazuhSvc to pick up the new config.
+
+    Returns True on success, False on any failure (Wazuh agent stays running
+    with whatever config it had — so we never break a working agent).
+    """
+    print(f"{C}    Pushing SOC template (FIM realtime + registry + event channels)...{RST}")
+
+    template_path = Path(__file__).parent / "wazuh" / "config" / "agents" / "ossec_windows.conf"
+    if not template_path.is_file():
+        print(f"{Y}    [!] {template_path} not found — skipping template push{RST}")
+        return False
+
+    # Render: replace manager address + port with current values
+    template = template_path.read_text(encoding="utf-8")
+    template = re.sub(r'<address>[^<]+</address>',
+                      f'<address>{MANAGER_IP}</address>', template, count=1)
+    template = re.sub(r'<port>\d+</port>',
+                      f'<port>{MANAGER_PORT}</port>', template, count=1)
+
+    # PowerShell-escape the rendered template by base64-encoding it.
+    # We send it as a base64 string PS will decode and write — avoids
+    # all quoting hell from the multi-line XML.
+    template_b64 = base64.b64encode(template.encode("utf-8")).decode("ascii")
+
+    # IMPORTANT: write the file as RAW BYTES via WriteAllBytes — not via
+    # Set-Content -Encoding UTF8, which inserts a UTF-8 BOM that makes
+    # the Wazuh agent silently fall back to the MSI default config.
+    push_ps = (
+        '$ErrorActionPreference = "Stop"\n'
+        f'$bytes = [System.Convert]::FromBase64String("{template_b64}")\n'
+        '$conf = "C:\\Program Files (x86)\\ossec-agent\\ossec.conf"\n'
+        'Stop-Service WazuhSvc -ErrorAction SilentlyContinue\n'
+        'Start-Sleep -Seconds 2\n'
+        '# Backup current config (one-time, only if no backup exists)\n'
+        '$backup = "$conf.prebackup-soc"\n'
+        'if (-not (Test-Path $backup)) { Copy-Item $conf $backup -Force }\n'
+        '[System.IO.File]::WriteAllBytes($conf, $bytes)\n'
+        '# Validate the written file actually contains our template\n'
+        '$content = Get-Content $conf -Raw\n'
+        'if (-not ($content -match "C:\\\\Users\\\\Public")) { Write-Output "validate=FAIL"; exit 1 }\n'
+        'Start-Service WazuhSvc\n'
+        '# Poll up to 60s for service to reach Running\n'
+        '$tries = 0\n'
+        'do {\n'
+        '  Start-Sleep -Seconds 2\n'
+        '  $status = (Get-Service WazuhSvc).Status\n'
+        '  $tries++\n'
+        '} while ($status -ne "Running" -and $tries -lt 30)\n'
+        'Start-Sleep -Seconds 2\n'
+        '$final = (Get-Service WazuhSvc).Status\n'
+        'Write-Output ("soc_push_status=" + $final)\n'
+    )
+    out, err, rc = ssh_run_win(ip, push_ps, user=win_user, timeout=60)
+    for line in (out or "").split("\n"):
+        if line.strip():
+            print(f"    {line}")
+    if "soc_push_status=Running" not in (out or ""):
+        print(f"{Y}    [!] SOC template pushed but WazuhSvc not running. Agent has backup at ossec.conf.prebackup-soc{RST}")
+        return False
+    print(f"{G}    SOC template applied. Agent restarted with comprehensive config.{RST}")
+    return True
+
+
+# ── Deploy Wazuh (Windows) ────────────────────────────────────────────
+def _deploy_wazuh_windows(ip, info, agent_name, win_user):
+    """Install + configure Wazuh agent on Windows via MSI."""
+    out, _, rc = ssh_run_win(
+        ip,
+        "Get-Service WazuhSvc -ErrorAction SilentlyContinue | Select-Object -Expand Status",
+        user=win_user, timeout=15,
+    )
+    if rc == 0 and "Running" in (out or ""):
+        check_log_ps = (
+            r'$log = "C:\Program Files (x86)\ossec-agent\ossec.log"; '
+            r'if (Test-Path $log) { '
+            r'  Get-Content $log -Tail 50 | Select-String "Connected to the server" | '
+            r'  Select-Object -Last 1 | ForEach-Object { $_.Line } '
+            r'} else { Write-Output "" }'
+        )
+        out2, _, _ = ssh_run_win(ip, check_log_ps, user=win_user, timeout=15)
+        if "Connected to the server" in (out2 or ""):
+            print(f"{G}[+] Wazuh agent already running and connected{RST}")
+            return True
+        print(f"{Y}[!] Existing agent broken. Removing and reinstalling...{RST}")
+        uninstall_ps = (
+            r'$p = Get-WmiObject -Class Win32_Product -Filter "Name LIKE ' + "''" + r'%Wazuh%' + "''" + r'" '
+            r'-ErrorAction SilentlyContinue | Select-Object -First 1; '
+            r'if ($p) { '
+            r'  $r = Start-Process msiexec.exe -ArgumentList @("/x",$p.IdentifyingNumber,"/qn") '
+            r'       -Wait -PassThru; Write-Output "uninstall_rc=$($r.ExitCode)" '
+            r'} else { Write-Output "no_existing_install" }; '
+            r'Remove-Item -Recurse -Force "C:\Program Files (x86)\ossec-agent" '
+            r'-ErrorAction SilentlyContinue'
+        )
+        ssh_run_win(ip, uninstall_ps, user=win_user, timeout=180)
+        time.sleep(3)
+
+    print(f"{C}    Registering via API...{RST}")
+    token = get_api_token(verbose=True)
+    if not token:
+        print(f"{R}[!] Cannot get API token{RST}"); return False
+    agent_id, key_line, err = api_register_agent(token, agent_name)
+    if not agent_id:
+        print(f"{R}[!] Registration failed: {err}{RST}"); return False
+    print(f"{G}    Registered: ID={agent_id}{RST}")
+
+    msi_url = get_wazuh_pkg_url(info)
+    print(f"{C}    Installing Wazuh agent (MSI download + msiexec /q)...{RST}")
+    install_ps = (
+        '$ErrorActionPreference = "Stop"\n'
+        '$ProgressPreference = "SilentlyContinue"\n'
+        r'$msi = "$env:TEMP\wazuh-agent.msi"' + '\n'
+        'Write-Output "Downloading MSI..."\n'
+        f'Invoke-WebRequest -Uri "{msi_url}" -OutFile $msi -UseBasicParsing\n'
+        'Write-Output "MSI size: $((Get-Item $msi).Length) bytes"\n'
+        'Write-Output "Running msiexec..."\n'
+        '$args = @("/i", $msi, "/q",\n'
+        f'          "WAZUH_MANAGER={MANAGER_IP}",\n'
+        f'          "WAZUH_AGENT_NAME={agent_name}")\n'        # Phase 1.1 fix applied: dropped WAZUH_REGISTRATION_SERVER and WAZUH_PROTOCOL
+        # which corrupted <enrollment><manager_address> on Win11.
+        '$p = Start-Process -FilePath msiexec.exe -ArgumentList $args -Wait -PassThru\n'
+        'Write-Output "msiexec_exit_code=$($p.ExitCode)"\n'
+        'Remove-Item -Force $msi\n'
+        'if ($p.ExitCode -ne 0) { exit $p.ExitCode }\n'
+    )
+    out, err, rc = ssh_run_win(ip, install_ps, user=win_user, timeout=300)
+    for line in (out or "").split("\n"):
+        if line.strip(): print(f"    {line}")
+    if rc != 0:
+        print(f"{R}[!] MSI install failed (rc={rc}): {err[:200]}{RST}")
+        api_delete_agent(token, agent_id)
+        return False
+
+    print(f"{C}    Injecting agent key + setting manager port {MANAGER_PORT}...{RST}")
+    key_escaped = key_line.replace("'", "''")
+    configure_ps = (
+        '$ErrorActionPreference = "Stop"\n'
+        r'$base = "C:\Program Files (x86)\ossec-agent"' + '\n'
+        r'$conf = "$base\ossec.conf"' + '\n'
+        r'$keys = "$base\client.keys"' + '\n'
+        'Stop-Service WazuhSvc -ErrorAction SilentlyContinue\n'
+        'Start-Sleep -Seconds 2\n'
+        f"'{key_escaped}' | Out-File -FilePath $keys -Encoding ASCII -Force\n"
+        '$content = Get-Content $conf -Raw\n'
+        # Strip any <enrollment>...</enrollment> block (we provide client.keys directly)
+        '$content = [System.Text.RegularExpressions.Regex]::Replace($content, \'\\s*<enrollment>.*?</enrollment>\', \'\', [System.Text.RegularExpressions.RegexOptions]::Singleline)\n'
+        '# Fix any 0.0.0.0 server address (MSI sometimes writes this)\n'
+        f"$content = $content -replace '<address>0\\.0\\.0\\.0</address>', '<address>{MANAGER_IP}</address>'\n"
+        f"$content = $content -replace '<port>1514</port>', '<port>{MANAGER_PORT}</port>'\n"
+        f"$content = $content -replace '<port>\\d+</port>', '<port>{MANAGER_PORT}</port>'\n"
+        'Set-Content -Path $conf -Value $content -Encoding UTF8\n'
+        'Start-Service WazuhSvc\n'
+        # Poll up to 30s for service to reach Running (was: fixed 5s,
+        # caught Win11 in StopPending intermittently)
+        '$tries = 0\n'
+        'do {\n'
+        '  Start-Sleep -Seconds 2\n'
+        '  $status = (Get-Service WazuhSvc).Status\n'
+        '  $tries++\n'
+        '} while ($status -ne "Running" -and $tries -lt 15)\n'
+        'Write-Output "service_status=$status"\n'
+    )
+    out, err, rc = ssh_run_win(ip, configure_ps, user=win_user, timeout=60)
+    for line in (out or "").split("\n"):
+        if line.strip(): print(f"    {line}")
+    if "service_status=Running" not in (out or ""):
+        print(f"{R}[!] WazuhSvc not running after install{RST}")
+        api_delete_agent(token, agent_id)
+        return False
+
+    print(f"{Y}    Waiting for manager connection...{RST}")
+    check_connected = (
+        r'$log = "C:\Program Files (x86)\ossec-agent\ossec.log"; '
+        r'if (Test-Path $log) { '
+        r'  Get-Content $log -Tail 80 | Select-String "Connected to the server" | '
+        r'  Select-Object -Last 1 | ForEach-Object { $_.Line } '
+        r'} else { Write-Output "" }'
+    )
+    connected = False
+    for _ in range(6):
+        time.sleep(5)
+        out, _, _ = ssh_run_win(ip, check_connected, user=win_user, timeout=15)
+        if "Connected to the server" in (out or ""):
+            print(f"    {G}{out.strip()}{RST}")
+            connected = True
+            break
+    if not connected:
+        print(f"{Y}    (Agent started but not yet confirmed connected — check ossec.log){RST}")
+
+    # Phase 2B-1: install Sysmon (so the SOC template Sysmon eventchannel
+    # has data to read once we apply the template below)
+    _install_sysmon_windows(ip, win_user)
+
+    # Phase 2A: push the SOC template (FIM realtime, registry, event channels)
+    _push_windows_soc_template(ip, win_user, agent_id)
+
+    return True
+
 
 # ── Deploy Suricata ───────────────────────────────────────────────────
 # Suricata version used for source builds (LTS, widely tested).
@@ -1326,6 +1703,17 @@ def main():
                 s.close()
             except: pass
         os_hint = "Windows" if any(p==3389 or p==445 for p,_ in ports) else "pfSense" if any(p==8443 for p,_ in ports) else "Linux"
+        if os_hint == "Linux" and any(p == 22 for p, _ in ports):
+            try:
+                bs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                bs.settimeout(1.5)
+                bs.connect((ip, 22))
+                banner_data = bs.recv(256).decode("utf-8", errors="ignore")
+                bs.close()
+                if "Windows" in banner_data:
+                    os_hint = "Windows"
+            except Exception:
+                pass
         host_details[ip] = {"ports": ports, "os_hint": os_hint}
 
     print(f"\n{B}{'#':>3}  {'IP':<18} {'Status':<22} {'OS Hint':<12} {'Open Ports'}{RST}")
@@ -1372,11 +1760,17 @@ def main():
         print(f"{B}  Processing: {ip}{RST}")
         print(f"{'='*55}")
 
-        if not setup_ssh(ip):
+        det = host_details.get(ip, {})
+        if det.get("os_hint") == "Windows":
+            default_winuser = os.getenv("WINDOWS_DEFAULT_USER", "Administrator")
+            target_user = input(f"\n{C}  Windows admin username [{default_winuser}]: {RST}").strip() or default_winuser
+        else:
+            target_user = "root"
+        if not setup_ssh(ip, user=target_user):
             print(f"{R}[!] Skipping {ip}{RST}"); continue
 
         print(f"\n{Y}[*] Detecting OS...{RST}")
-        info = detect_os(ip)
+        info = detect_os(ip, user=target_user)
         print(f"    OS: {C}{info['os']} {info['version']}{RST} | Family: {C}{info['family']}{RST} | Arch: {C}{info['arch']}{RST} | Pkg: {C}{info['pkg']}{RST}")
 
         confirm = input(f"\n{C}  Correct? [Y/n/manual]: {RST}").strip().lower()
@@ -1410,13 +1804,15 @@ def main():
         if input(f"\n{C}  Deploy? [Y/n]: {RST}").strip().lower() == "n": continue
 
         # Phase 1: Wazuh
-        if not deploy_wazuh(ip, info, name):
+        if not deploy_wazuh(ip, info, name, win_user=target_user):
             print(f"\n{R}  ❌ {name} ({ip}) — Wazuh deploy failed{RST}")
             continue
 
-        # Phase 2: Suricata (optional)
+        # Phase 2: Suricata (Linux only for now; Windows pending)
         if install_suricata:
-            if deploy_suricata(ip, info):
+            if info.get("family") == "windows":
+                print(f"{Y}[!] Suricata on Windows: not yet implemented (Phase 2). Skipping.{RST}")
+            elif deploy_suricata(ip, info):
                 # Phase 3: Integrate Suricata → Wazuh
                 integrate_suricata_with_wazuh(ip)
             else:

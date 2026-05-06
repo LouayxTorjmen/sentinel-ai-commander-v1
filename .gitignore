@@ -103,3 +103,11 @@ wazuh/config/dashboard/opensearch_dashboards.yml
 wazuh/config/dashboard/wazuh.yml
 wazuh/config/indexer/internal_users.yml
 enroll.py.prebackup
+
+# Runtime working files (rewritten by ansible-runner each playbook execution)
+ansible/env/extravars*
+
+# Local backups from in-place patching (development scaffolding, never committed)
+*.bak
+*.prebackup
+*.prebackup-*
