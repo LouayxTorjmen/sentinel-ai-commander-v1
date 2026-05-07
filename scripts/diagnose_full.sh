@@ -4,7 +4,7 @@
 SSH="ssh -i ansible/keys/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
 TOKEN=$(curl -sk -X POST https://localhost:50001/security/user/authenticate \
-  -u "wazuh-wui:Louay@2002" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['token'])")
+  -u "${WAZUH_API_USER}:${WAZUH_API_PASSWORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['token'])")
 
 echo "================================================================"
 echo " SENTINEL-AI Diagnostic — IT Hygiene + Vuln Detection"
@@ -14,17 +14,17 @@ echo ""
 echo "--- CHECK 1: wazuh-states-* indices in OpenSearch ---"
 echo "(these are where IT Hygiene data is stored in Wazuh 4.14)"
 curl -sk "https://localhost:50002/_cat/indices/wazuh-states*?h=index,docs.count,store.size&s=index" \
-  -u "admin:Louay@2002"
+  -u "${WAZUH_INDEXER_USER}:${WAZUH_INDEXER_PASSWORD}"
 echo ""
 
 echo "--- CHECK 2: wazuh-vulnerabilities-* indices ---"
 curl -sk "https://localhost:50002/_cat/indices/wazuh-vulnerabilities*?h=index,docs.count,store.size" \
-  -u "admin:Louay@2002"
+  -u "${WAZUH_INDEXER_USER}:${WAZUH_INDEXER_PASSWORD}"
 echo ""
 
 echo "--- CHECK 3: ALL wazuh indices (see what actually exists) ---"
 curl -sk "https://localhost:50002/_cat/indices?h=index,docs.count&s=index" \
-  -u "admin:Louay@2002" | grep wazuh
+  -u "${WAZUH_INDEXER_USER}:${WAZUH_INDEXER_PASSWORD}" | grep wazuh
 echo ""
 
 echo "--- CHECK 4: Manager ossec.conf — vulnerability-detection + indexer blocks ---"

@@ -14,17 +14,17 @@ echo ""
 
 echo "--- 2. wazuh-states-inventory-* indices (IT Hygiene data lives here) ---"
 curl -sk "https://localhost:50002/_cat/indices/wazuh-states*?h=index,docs.count,store.size&s=index" \
-  -u "admin:Louay@2002"
+  -u "${WAZUH_INDEXER_USER}:${WAZUH_INDEXER_PASSWORD}"
 echo ""
 
 echo "--- 3. vulnerability indices ---"
 curl -sk "https://localhost:50002/_cat/indices/wazuh-vuln*?h=index,docs.count,store.size" \
-  -u "admin:Louay@2002"
+  -u "${WAZUH_INDEXER_USER}:${WAZUH_INDEXER_PASSWORD}"
 echo ""
 
 echo "--- 4. Sample inventory data for one agent ---"
 curl -sk "https://localhost:50002/wazuh-states-inventory-packages/_search?size=2&pretty" \
-  -u "admin:Louay@2002" 2>/dev/null | python3 -c "
+  -u "${WAZUH_INDEXER_USER}:${WAZUH_INDEXER_PASSWORD}" 2>/dev/null | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 total=d.get('hits',{}).get('total',{}).get('value',0)

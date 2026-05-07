@@ -40,7 +40,7 @@ import datetime
 
 
 INDEXER_URL = os.environ.get("WAZUH_INDEXER_URL", "https://wazuh.indexer:9200")
-INDEXER_USER = os.environ.get("WAZUH_INVENTORY_SYNC_CREDS", "admin:Louay@2002")
+INDEXER_USER = os.environ.get("WAZUH_INVENTORY_SYNC_CREDS", "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
