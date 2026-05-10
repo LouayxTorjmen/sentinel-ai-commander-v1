@@ -29,17 +29,6 @@ volumes:
     name: sentinel_ml_models
 
 services:
-  suricata:
-    build: { context: ./docker/suricata, dockerfile: Dockerfile }
-    container_name: sentinel-suricata
-    hostname: sentinel-suricata
-    restart: always
-    network_mode: host
-    cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
-    environment: ["SURICATA_INTERFACE=${SURICATA_INTERFACE:-}"]
-    volumes:
-      - suricata-logs:/var/log/suricata
-      - ./suricata/rules/custom:/custom-rules:ro
 
   postgres:
     image: postgres:16-alpine
