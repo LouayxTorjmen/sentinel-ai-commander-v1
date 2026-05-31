@@ -73,6 +73,16 @@ $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
       2>/dev/null && echo reset || echo skipped" \
   2>&1 | grep -E "CHANGED|FAILED|reset|skipped"
 
+
+# 8b) Ensure dnsdist is running on srv-dns-bind
+echo "[8b] Starting dnsdist on srv-dns-bind..."
+$ANSIBLE $INV srv-dns-bind -m shell --become \
+  -a 'systemctl restart dnsdist 2>/dev/null; systemctl is-active dnsdist || echo failed' \
+  2>&1 | grep -E "CHANGED|FAILED|active|failed"
+
+# 9b) Wait for dispatcher dedup window to expire
+echo "[9b] Waiting 65s for dispatcher dedup window to expire..."
+sleep 65
 # 9) Verify Kali can reach DVWA (most important check)
 echo "[9] Verifying DVWA is reachable from outside..."
 HTTP=$(curl -sS -o /dev/null -w "%{http_code}" http://10.50.0.12/dvwa/login.php 2>/dev/null || echo "FAIL")
