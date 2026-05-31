@@ -74,11 +74,11 @@ $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   2>&1 | grep -E "CHANGED|FAILED|reset|skipped"
 
 
-# 8b) Ensure dnsdist is running on srv-dns-bind
-echo "[8b] Starting dnsdist on srv-dns-bind..."
+# 8b) Fix dnsdist config syntax + restart on srv-dns-bind
+echo "[8b] Fixing dnsdist config and restarting..."
 $ANSIBLE $INV srv-dns-bind -m shell --become \
-  -a 'systemctl restart dnsdist 2>/dev/null; systemctl is-active dnsdist || echo failed' \
-  2>&1 | grep -E "CHANGED|FAILED|active|failed"
+  -a 'python3 -c "import re; f=open("/etc/dnsdist/dnsdist.conf"); s=f.read(); f.close(); s=re.sub(r"addAction\(NetmaskGroupRule\(newNMG\(\):addMask\(([^)]+)\)\), DropAction\(\)\)", lambda m: "local _nmg = newNMG(); _nmg:addMask(" + m.group(1) + "); addAction(NetmaskGroupRule(_nmg), DropAction())", s); open("/etc/dnsdist/dnsdist.conf","w").write(s); print("fixed")" && cp /etc/dnsdist/dnsdist.conf /var/lib/sentinel-ai/baselines/_etc_dnsdist_dnsdist.conf.baseline && systemctl restart dnsdist && systemctl is-active dnsdist || echo failed' \
+  2>&1 | grep -E "CHANGED|FAILED|active|failed|fixed"
 
 # 9b) Wait for dispatcher dedup window to expire
 echo "[9b] Waiting 65s for dispatcher dedup window to expire..."
