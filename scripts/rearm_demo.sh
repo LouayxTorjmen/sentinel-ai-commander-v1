@@ -82,6 +82,9 @@ if [ "$HTTP" != "200" ]; then
   # Force clear all iptables rules
   $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
     -a 'iptables -F && iptables -X && iptables -P INPUT ACCEPT && echo "iptables reset"' \
+  $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
+    -a 'systemctl restart apache2 && echo "apache restarted"' \
+    2>&1 | grep -E "CHANGED|restarted"
     2>&1 | grep -E "CHANGED|reset"
 fi
 
