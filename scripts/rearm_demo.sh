@@ -20,12 +20,6 @@ $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   -a 'systemctl restart apache2 && systemctl is-active apache2' \
   2>&1 | grep -E "CHANGED|FAILED|active"
 
-# 1b) Restart Apache on srv-web (iptables flush kills connections)
-echo "[1b] Restarting Apache on srv-web..."
-$ANSIBLE $INV Ubuntu-agent-web -m shell --become \
-  -a 'systemctl restart apache2 && systemctl is-active apache2' \
-  2>&1 | grep -E "CHANGED|FAILED|active"
-
 # 2) Clear Windows Firewall block on srv-ad-dns
 echo "[2] Clearing Windows Firewall blocks on srv-ad-dns..."
 $ANSIBLE $INV srv-ad-dns -m win_shell \
