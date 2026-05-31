@@ -123,3 +123,5 @@ sentinel-attack.tar.gz
 ansible/lab_state.json
 docker-compose.yml.bak*
 wazuh/docker-compose.yml.bak*
+.env.bak*
+.env.bak_*
