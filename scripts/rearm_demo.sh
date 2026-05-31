@@ -36,6 +36,12 @@ $ANSIBLE $INV srv-ad-dns -m win_shell \
 echo "[3] Re-arming nginx weak TLS..."
 $PLAYBOOK $INV /ansible/playbooks/setup_nginx_weak_tls.yml 2>&1 | tail -2
 
+# 3b) Ensure Apache is running after nginx re-arm
+echo "[3b] Ensuring Apache is running..."
+$ANSIBLE $INV Ubuntu-agent-web -m shell --become \
+  -a 'systemctl restart apache2 && systemctl is-active apache2' \
+  2>&1 | grep -E "CHANGED|FAILED|active"
+
 # 4) Re-enable MySQL general log + restore dvwa SELECT on infra_credentials
 echo "[4] Re-arming MySQL..."
 $ANSIBLE $INV srv-sql -m shell \
