@@ -76,6 +76,14 @@ $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
 
 # 8b) Fix dnsdist config syntax + restart on srv-dns-bind
 echo "[8b] Fixing dnsdist config and restarting..."
+$ANSIBLE $INV srv-dns-bind -m copy \
+  -a "src=$(pwd)/scripts/fix_dnsdist.py dest=/tmp/fix_dnsdist.py mode=0755" \
+  2>&1 | grep -E "CHANGED|FAILED" || true
+$ANSIBLE $INV srv-dns-bind -m shell --become \
+  -a "python3 /tmp/fix_dnsdist.py && \
+      cp /etc/dnsdist/dnsdist.conf /var/lib/sentinel-ai/baselines/_etc_dnsdist_dnsdist.conf.baseline && \
+      systemctl restart dnsdist && systemctl is-active dnsdist || echo failed" \
+  2>&1 | grep -E "CHANGED|FAILED|active|failed|fixed"
 $ANSIBLE $INV srv-dns-bind -m shell --become \
   -a 'python3 -c "import re; f=open("/etc/dnsdist/dnsdist.conf"); s=f.read(); f.close(); s=re.sub(r"addAction\(NetmaskGroupRule\(newNMG\(\):addMask\(([^)]+)\)\), DropAction\(\)\)", lambda m: "local _nmg = newNMG(); _nmg:addMask(" + m.group(1) + "); addAction(NetmaskGroupRule(_nmg), DropAction())", s); open("/etc/dnsdist/dnsdist.conf","w").write(s); print("fixed")" && cp /etc/dnsdist/dnsdist.conf /var/lib/sentinel-ai/baselines/_etc_dnsdist_dnsdist.conf.baseline && systemctl restart dnsdist && systemctl is-active dnsdist || echo failed' \
   2>&1 | grep -E "CHANGED|FAILED|active|failed|fixed"
