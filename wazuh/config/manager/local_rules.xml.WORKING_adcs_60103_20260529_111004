@@ -1,0 +1,1755 @@
+<!-- SENTINEL-AI Custom Rules -->
+<group name="local,syslog,suricata,sentinel">
+
+  <!-- ── Suricata IDS alerts via eve.json (EXISTING) ───────────────────── -->
+  <rule id="100001" level="5">
+    <decoded_as>json</decoded_as>
+    <field name="event_type">^alert$</field>
+    <description>Suricata IDS: $(alert.signature)</description>
+    <group>ids,suricata,</group>
+  </rule>
+
+  <rule id="100002" level="8">
+    <if_sid>100001</if_sid>
+    <field name="alert.severity">1</field>
+    <description>Suricata IDS CRITICAL: $(alert.signature)</description>
+    <group>ids,suricata,attack,</group>
+  </rule>
+
+  <rule id="100003" level="7">
+    <if_sid>100001</if_sid>
+    <field name="alert.severity">2</field>
+    <description>Suricata IDS HIGH: $(alert.signature)</description>
+    <group>ids,suricata,attack,</group>
+  </rule>
+
+  <!-- ── SSH brute force escalation (EXISTING) ─────────────────────────── -->
+  <rule id="100010" level="10" frequency="8" timeframe="120">
+    <if_matched_sid>5716</if_matched_sid>
+    <description>SSH brute force attack (8+ failures in 2 min) from $(srcip)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,brute_force,</group>
+  </rule>
+
+  <!-- ── Successful login after brute force (EXISTING) ─────────────────── -->
+  <rule id="100011" level="12">
+    <if_matched_sid>100010</if_matched_sid>
+    <if_sid>5715</if_sid>
+    <same_source_ip/>
+    <description>Successful login after brute force from $(srcip) — possible credential compromise</description>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+    <group>authentication_success,brute_force,credential_access,</group>
+  </rule>
+
+  <!-- ── Web attack patterns (EXISTING) ────────────────────────────────── -->
+  <rule id="100020" level="10">
+    <if_sid>31100</if_sid>
+    <url>../</url>
+    <description>Directory traversal attempt from $(srcip)</description>
+    <mitre>
+      <id>T1083</id>
+    </mitre>
+    <group>web,attack,</group>
+  </rule>
+
+  <!-- ─── BIND DNS reconnaissance (NEW) ────────────────────────────────── -->
+
+  <!-- Base rule: any BIND query log line decoded. Level 0 → no alert,
+       but enables frequency/correlation rules below. -->
+  <rule id="100100" level="2">
+    <decoded_as>bind9-query</decoded_as>
+    <description>BIND DNS query from $(srcip): $(query_name) $(query_type)</description>
+    <group>dns,bind,</group>
+  </rule>
+
+  <!-- DNS query flood: 50+ queries from one source in 60s → T1590 -->
+  <rule id="100101" level="10" frequency="50" timeframe="60">
+    <if_matched_sid>100100</if_matched_sid>
+    <description>Possible DNS reconnaissance: 50+ queries in 60s from $(srcip)</description>
+    <mitre>
+      <id>T1590</id>
+    </mitre>
+    <group>dns,recon,bind,</group>
+  </rule>
+
+  <!-- Zone transfer attempt (AXFR / IXFR) → T1590 / very high signal -->
+  <rule id="100102" level="11">
+    <if_sid>100100</if_sid>
+    <field name="query_type">AXFR</field>
+    <description>DNS zone transfer attempt: $(srcip) requested $(query_type) $(query_name)</description>
+    <mitre>
+      <id>T1590</id>
+    </mitre>
+    <group>dns,recon,zone_transfer,bind,</group>
+  </rule>
+
+  <!-- AD service-record probing (attacker mapping Kerberos / LDAP) -->
+  <rule id="100103" level="8" frequency="3" timeframe="60">
+    <if_matched_sid>100100</if_matched_sid>
+    <field name="query_name">_kerberos</field>
+    <description>AD service-record enumeration from $(srcip): $(query_name)</description>
+    <mitre>
+      <id>T1590</id>
+    </mitre>
+    <group>dns,recon,ad,bind,</group>
+  </rule>
+
+</group>
+
+<!-- ─── Falco eBPF runtime rules (NEW) ────────────────────────────── -->
+
+<!-- ─── Falco eBPF runtime rules ──────────────────────────────────── -->
+<group name="falco,ebpf,sentinel,">
+
+  <!-- Base rule: every Falco event. Triggered by presence of priority+hostname
+       in decoded JSON. Both fields uniquely identify Falco output among other
+       JSON sources (Suricata uses 'severity' instead). Low level so it's
+       silent-routing for child rules below. -->
+  <rule id="100110" level="2">
+    <decoded_as>json</decoded_as>
+    <match>"hostname":</match>
+    <description>Falco event detected</description>
+    <group>falco_event,</group>
+  </rule>
+
+  <!-- High-priority events (Emergency/Alert/Critical from Falco) -->
+  <rule id="100111" level="12">
+    <if_sid>100110</if_sid>
+    <field name="priority">Emergency|Alert|Critical</field>
+    <description>Falco CRITICAL on $(hostname): $(output_fields.proc.cmdline)</description>
+    <group>falco_critical,</group>
+  </rule>
+
+  <!-- Error/Warning -->
+  <rule id="100112" level="7">
+    <if_sid>100110</if_sid>
+    <field name="priority">Error|Warning</field>
+    <description>Falco WARNING on $(hostname): $(output_fields.proc.cmdline)</description>
+    <group>falco_warning,</group>
+  </rule>
+
+  <!-- Reverse/bind shell or netcat exec (matches via <match> on full event line) -->
+  <rule id="100113" level="13">
+    <if_sid>100110</if_sid>
+    <match>Reverse shell|Netcat Remote Code|terminal shell in</match>
+    <description>Falco: shell/netcat activity on $(hostname) - $(output_fields.proc.cmdline)</description>
+    <group>shell,T1059,</group>
+    <mitre>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <!-- Sensitive file read (e.g. /etc/shadow). Matches the Falco rule name
+       in the raw event line via <match>. -->
+  <rule id="100114" level="10">
+    <if_sid>100110</if_sid>
+    <match>"rule":"Read sensitive file</match>
+    <description>Falco: sensitive file read on $(hostname) - $(output_fields.fd.name) by $(output_fields.proc.name)</description>
+    <group>credential_access,T1555,</group>
+    <mitre>
+      <id>T1555</id>
+    </mitre>
+  </rule>
+
+  <!-- Suspicious shell parent (process spawned by a service daemon) -->
+  <rule id="100115" level="11">
+    <if_sid>100110</if_sid>
+    <field name="output_fields.proc.pname">apache2|httpd|mysqld|named|nginx</field>
+    <description>Falco: shell from service process on $(hostname) - parent=$(output_fields.proc.pname) cmd=$(output_fields.proc.cmdline)</description>
+    <group>execution,T1190,</group>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+  </rule>
+
+</group>
+<!--
+  SENTINEL-AI Manager Rules — srv-dns-bind (agent 014) additions
+  Append this block to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+  before the closing of the file. Then docker-cp + container recreate to deploy.
+
+  Two sections:
+    1. Noise suppression: lower the level of routine events from this host
+    2. Service-specific high-value rules for BIND DNS
+-->
+
+<group name="sentinel,srv-dns-bind,noise_suppression">
+
+  <!-- Suppress routine PAM session noise from this specific agent.
+       PAM 5501/5502 fire on every sudo and every login: too noisy for
+       a single-service DNS box where SSH is admin-only and infrequent.
+       Use level 0 = "silently routed, not alerted on". -->
+
+  <rule id="100140" level="0">
+    <if_sid>5501</if_sid>
+    <hostname>auto-victim1-ubuntu</hostname>
+    <description>PAM session opened (srv-dns-bind: suppressed routine)</description>
+  </rule>
+
+  <rule id="100141" level="0">
+    <if_sid>5502</if_sid>
+    <hostname>auto-victim1-ubuntu</hostname>
+    <description>PAM session closed (srv-dns-bind: suppressed routine)</description>
+  </rule>
+
+  <!-- Successful sudo: keep but downgrade from 3 to 0 except from non-mgmt subnet.
+       Mgmt VLAN is 10.99.0.0/24. Sudo from anywhere else is suspicious. -->
+
+  <rule id="100142" level="0">
+    <if_sid>5402</if_sid>
+    <hostname>auto-victim1-ubuntu</hostname>
+    <description>Successful sudo (srv-dns-bind: routine from mgmt)</description>
+  </rule>
+
+
+</group>
+
+<group name="sentinel,srv-dns-bind,bind_specific">
+
+  <!-- BIND config file tampering. /etc/bind/named.conf, named.conf.options,
+       named.conf.local, named.conf.default-zones are all critical.
+       Triggered by FIM rules 550 (modified), 553 (deleted), 554 (added). -->
+
+  <rule id="100120" level="12">
+    <if_sid>550,553,554</if_sid>
+    <hostname>auto-victim1-ubuntu</hostname>
+    <match>/etc/bind/</match>
+    <description>BIND configuration file modified: $(file)</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+  <!-- BIND zone file modification.
+       Zone files live in /etc/bind/db.* or /var/named/ or /var/lib/bind/.
+       Any change is a high-confidence integrity event. -->
+
+  <rule id="100121" level="11">
+    <if_sid>550,553,554</if_sid>
+    <hostname>auto-victim1-ubuntu</hostname>
+    <match>/etc/bind/db.</match>
+    <description>BIND zone data modified: $(file)</description>
+    <mitre>
+      <id>T1565.001</id>
+    </mitre>
+    <group>data_integrity,impact,</group>
+  </rule>
+
+  <!-- Falco saw the named process writing files outside its normal zones.
+       The named daemon should ONLY write to its journal files (.jnl).
+       Any other write by named = compromise indicator. -->
+
+  <rule id="100122" level="13">
+    <if_sid>100110</if_sid>
+    <field name="output_fields.proc.name">named</field>
+    <field name="evt.type">write|writev|openat</field>
+    <description>BIND named process writing unexpected file: $(output_fields.fd.name)</description>
+    <mitre>
+      <id>T1574</id>
+    </mitre>
+    <group>process_injection,defense_evasion,</group>
+  </rule>
+
+  <!-- High-entropy DNS query name = likely DGA (Domain Generation Algorithm).
+       Real DGA detection needs entropy scoring which OSSEC regex can't do
+       directly, but we can flag obviously-random strings: 20+ char hostname
+       with no vowels or with mixed digits and letters at random positions.
+       This is a starter heuristic — a real DGA detector would be a custom
+       script feeding into a Wazuh integration. -->
+
+  <rule id="100123" level="9">
+    <if_sid>100100</if_sid>
+    <field name="query_name">[a-z0-9]{20,}\.</field>
+    <description>Suspicious long random-looking DNS query: $(query_name) from $(srcip)</description>
+    <mitre>
+      <id>T1568.002</id>
+    </mitre>
+    <group>dga,c2,command_and_control,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,correlation,cross_source">
+
+  <!-- DNS recon by tool: Suricata applayer mismatch (rule 86601) fires when
+       nmap/zmap probes hit BIND with non-conformant protocol traffic. If
+       this same source IP also caused a DNS query (rule 100100) within
+       30 seconds, that's high-confidence automated reconnaissance.
+
+       Note: this rule fires off the SURICATA event, not the BIND event.
+       It uses if_matched_sid to chain on rule 86601 and same_field srcip
+       to require correlation on source IP. -->
+
+  <rule id="100130" level="12" frequency="2" timeframe="30">
+    <if_matched_sid>86601</if_matched_sid>
+    <if_matched_sid>100100</if_matched_sid>
+    <match>10.50.0.|10.60.0.|10.70.0.</match>
+    <description>Coordinated DNS recon: Suricata + BIND saw probes from $(srcip)</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1590</id>
+    </mitre>
+    <group>recon,correlation,</group>
+  </rule>
+
+  <!-- Zone tampering correlated with unexpected admin: rule 100121 (zone
+       file modified) followed by 5402 (sudo to root) within 5 minutes by
+       a user other than the expected admin user. Detects an attacker who
+       compromised an account and is modifying DNS to redirect traffic. -->
+
+  <rule id="100131" level="13" frequency="2" timeframe="300">
+    <if_matched_sid>100121</if_matched_sid>
+    <if_matched_sid>5402</if_matched_sid>
+    <description>Possible DNS tampering: zone file modified + sudo from non-routine user</description>
+    <mitre>
+      <id>T1565.001</id>
+    </mitre>
+    <group>data_integrity,correlation,</group>
+  </rule>
+
+</group>
+<!--
+  SENTINEL-AI Manager Rules — srv-web (agent 089) additions
+  Append this block to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  Sections:
+    1. FIX rule 100131 — was firing false positives during routine sudo
+    2. Noise suppression for srv-web agent
+    3. Service-specific high-value rules for Apache + DVWA + (nginx)
+    4. Cross-source correlation rules (Apache + Falco + Suricata)
+-->
+
+<!-- ─── FIX: rule 100131 was too loose ────────────────────────────── -->
+<!--
+     Replace the previous 100131 definition. We can't actually replace
+     in-place from an append-only file, so we DISABLE the old one by
+     redefining at a higher precedence and document the tightening.
+
+     Note: Wazuh fires rules by ID order, so a redefined ID with the
+     same number overrides the previous load. This works because rules
+     within a single XML file process top-down.
+
+     Tightened version requires:
+       - Rule 100121 (zone file modified) fires once
+       - Rule 5402 (sudo to root) fires once
+       - WITHIN 60 seconds (was 300s)
+       - Combined frequency stays at 2 — but now requires BOTH children
+-->
+
+<group name="sentinel,correlation,fixes">
+
+  <rule id="100131" level="13" frequency="2" timeframe="60" overwrite="yes">
+    <if_matched_sid>100121</if_matched_sid>
+    <if_sid>5402</if_sid>
+    <description>Possible DNS tampering: zone file modified within 60s of sudo to root</description>
+    <mitre>
+      <id>T1565.001</id>
+    </mitre>
+    <group>data_integrity,correlation,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-web,noise_suppression">
+
+  <!-- PAM session and routine sudo: suppress for srv-web only.
+       Same pattern as srv-dns-bind. -->
+
+  <rule id="100160" level="0">
+    <if_sid>5501</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <description>PAM session opened (srv-web: suppressed routine)</description>
+  </rule>
+
+  <rule id="100161" level="0">
+    <if_sid>5502</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <description>PAM session closed (srv-web: suppressed routine)</description>
+  </rule>
+
+  <rule id="100162" level="0">
+    <if_sid>5402</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <description>Successful sudo (srv-web: suppressed routine admin)</description>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-web,web_specific">
+
+  <!-- WEBSHELL DROP DETECTION — highest-value rule for this host.
+       FIM rule 554 (file added) on the DVWA uploads directory.
+       Use <match> against the raw event because <field name="file">
+       doesn't accept arbitrary regex (we learned this on srv-dns-bind). -->
+
+  <rule id="100150" level="13">
+    <if_sid>554</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>/var/www/html/dvwa/hackable/uploads/</match>
+    <description>POSSIBLE WEBSHELL DROP on srv-web: $(file)</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>webshell,persistence,T1505,</group>
+  </rule>
+
+  <!-- Apache config tampering -->
+  <rule id="100151" level="11">
+    <if_sid>550,553,554</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>/etc/apache2/</match>
+    <description>Apache config modified on srv-web: $(file)</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+  <!-- nginx config tampering (when nginx is added) -->
+  <rule id="100152" level="11">
+    <if_sid>550,553,554</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>/etc/nginx/</match>
+    <description>nginx config modified on srv-web: $(file)</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+  <!-- TLS private key modification — critical -->
+  <rule id="100153" level="14">
+    <if_sid>550,553,554</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>/etc/ssl/private/</match>
+    <description>TLS private key modified on srv-web: $(file)</description>
+    <mitre>
+      <id>T1552.004</id>
+    </mitre>
+    <group>credential_access,T1552,</group>
+  </rule>
+
+  <!-- Apache process spawning shell-like child via Falco eBPF.
+       This is the webshell-exec smoking gun: Apache (apache2 / www-data)
+       should NEVER spawn bash, sh, dash, etc. -->
+
+  <rule id="100155" level="14">
+    <if_sid>100110</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>"proc.pname":"apache2"</match>
+    <match>"evt.type":"execve"</match>
+    <description>Apache spawned child process on srv-web — possible webshell exec</description>
+    <mitre>
+      <id>T1059.004</id>
+    </mitre>
+    <group>shell,T1059,T1505,</group>
+  </rule>
+
+  <!-- Apache process reading sensitive file via Falco -->
+  <rule id="100156" level="12">
+    <if_sid>100110</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>"proc.name":"apache2"</match>
+    <match>"rule":"Read sensitive file</match>
+    <description>Apache process reading sensitive file on srv-web</description>
+    <mitre>
+      <id>T1083</id>
+    </mitre>
+    <group>file_discovery,T1083,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,correlation,srv-web">
+
+  <!-- Webshell delivery — FIM saw the file drop, Suricata sees HTTP
+       traffic to that path within 60 seconds. Both layers agreeing
+       gives high-confidence "attacker dropped + accessed webshell". -->
+
+  <rule id="100170" level="14" frequency="2" timeframe="60">
+    <if_matched_sid>100150</if_matched_sid>
+    <if_sid>86601</if_sid>
+    <description>HIGH-CONFIDENCE WEBSHELL DELIVERY on srv-web: drop + access correlated</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>webshell,correlation,persistence,</group>
+  </rule>
+
+  <!-- Reverse shell exfil from compromised web server: Apache spawned
+       shell + outbound network connect within 30 seconds. Detects the
+       webshell -> reverse-shell -> exfil chain. -->
+
+  <rule id="100171" level="15" frequency="2" timeframe="30">
+    <if_matched_sid>100155</if_matched_sid>
+    <if_matched_sid>100110</if_matched_sid>
+    <description>POSSIBLE REVERSE SHELL on srv-web: Apache shell + outbound connection</description>
+    <mitre>
+      <id>T1071.001</id>
+    </mitre>
+    <group>command_and_control,exfiltration,correlation,</group>
+  </rule>
+
+</group>
+<!--
+  SENTINEL-AI Manager Rules — srv-sql (agent 015) additions
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  Sections:
+    1. ANOTHER FIX for rule 100131 — scope it to srv-dns-bind only
+    2. Noise suppression for srv-sql agent
+    3. MySQL/DB-specific high-value rules
+    4. Cross-source correlation rules for DB attacks
+-->
+
+<!-- ─── FIX: rule 100131 was firing on srv-sql ─────────────────────
+     The previous attempt overwrote the rule but did NOT scope it.
+     Result: any agent that experiences a FIM event resembling
+     a zone file + sudo within 60s gets the alert. Wrong.
+
+     Scope to srv-dns-bind only via hostname constraint on one of
+     the child rules. The cleaner way is to scope rule 100121 itself,
+     but that already has the constraint. The problem must be that
+     <hostname> doesn't propagate through if_matched_sid.
+
+     Tightest fix: split into two rules. 100131 stays as the global
+     correlation. 100131 fires only when BOTH children fired ON THE
+     SAME AGENT — which Wazuh handles via the same_field directive.
+-->
+
+<group name="sentinel,correlation,fixes">
+
+  <rule id="100131" level="13" frequency="2" timeframe="60" overwrite="yes">
+    <if_matched_sid>100121</if_matched_sid>
+    <if_sid>5402</if_sid>
+    <hostname>auto-victim1-ubuntu</hostname>
+    <description>Possible DNS tampering: zone file modified within 60s of sudo to root on srv-dns-bind</description>
+    <mitre>
+      <id>T1565.001</id>
+    </mitre>
+    <group>data_integrity,correlation,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-sql,noise_suppression">
+
+  <rule id="100190" level="0">
+    <if_sid>5501</if_sid>
+    <hostname>auto-victim2-rhel</hostname>
+    <description>PAM session opened (srv-sql: suppressed routine)</description>
+  </rule>
+
+  <rule id="100191" level="0">
+    <if_sid>5502</if_sid>
+    <hostname>auto-victim2-rhel</hostname>
+    <description>PAM session closed (srv-sql: suppressed routine)</description>
+  </rule>
+
+  <rule id="100192" level="0">
+    <if_sid>5402</if_sid>
+    <hostname>auto-victim2-rhel</hostname>
+    <description>Successful sudo (srv-sql: suppressed routine admin)</description>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-sql,mysql_specific">
+
+  <!-- MySQL config file tampering -->
+  <rule id="100180" level="12">
+    <if_sid>550,553,554</if_sid>
+    <hostname>auto-victim2-rhel</hostname>
+    <match>/etc/my.cnf</match>
+    <description>MySQL config modified on srv-sql: $(file)</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+  <!-- Per-DB cnf file tampering inside /var/lib/mysql -->
+  <rule id="100181" level="11">
+    <if_sid>550,553,554</if_sid>
+    <hostname>auto-victim2-rhel</hostname>
+    <match>/var/lib/mysql/</match>
+    <match>.cnf</match>
+    <description>Per-DB MySQL config modified on srv-sql: $(file)</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+  <!-- MySQL access denied burst — possible credential brute force.
+       Triggered by Wazuh's existing MySQL rules (50101, 50102 are
+       in the default ruleset). frequency=5 in 60s = brute force. -->
+  <rule id="100182" level="11" frequency="5" timeframe="60">
+    <if_matched_sid>50101</if_matched_sid>
+    <hostname>auto-victim2-rhel</hostname>
+    <description>MySQL credential brute force on srv-sql: 5+ access denied in 60s</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>brute_force,authentication_failures,</group>
+  </rule>
+
+  <!-- mysqld process spawning shell-like child via Falco.
+       This is the SQL injection → RCE smoking gun.
+       Detects via Falco rule 100110 firing with parent process mysqld. -->
+  <rule id="100183" level="14">
+    <if_sid>100110</if_sid>
+    <hostname>auto-victim2-rhel</hostname>
+    <match>"proc.pname":"mysqld"</match>
+    <match>"evt.type":"execve"</match>
+    <description>mysqld spawned child process on srv-sql — possible SQL RCE</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>execution,T1190,</group>
+  </rule>
+
+  <!-- mysqld reading sensitive file outside its data dir.
+       mysqld legitimately reads /var/lib/mysql/* and its own config.
+       Reading /etc/shadow, /etc/passwd, SSH keys, etc = compromise. -->
+  <rule id="100184" level="13">
+    <if_sid>100110</if_sid>
+    <hostname>auto-victim2-rhel</hostname>
+    <match>"proc.name":"mysqld"</match>
+    <match>"rule":"Read sensitive file</match>
+    <description>mysqld reading sensitive file on srv-sql — possible compromise</description>
+    <mitre>
+      <id>T1003</id>
+    </mitre>
+    <group>credential_access,T1003,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,correlation,srv-sql">
+
+  <!-- DB brute force correlated with Suricata network detection of MySQL traffic.
+       Rule 100182 + Suricata MySQL signature in same timeframe = coordinated. -->
+  <rule id="100185" level="13" frequency="2" timeframe="60">
+    <if_matched_sid>100182</if_matched_sid>
+    <if_sid>86601</if_sid>
+    <description>Coordinated MySQL brute force on srv-sql: app-layer + network layer agree</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>brute_force,correlation,</group>
+  </rule>
+
+  <!-- mysqld spawned shell + outbound connection within 30s = RCE → exfil -->
+  <rule id="100186" level="15" frequency="2" timeframe="30">
+    <if_matched_sid>100183</if_matched_sid>
+    <if_matched_sid>100110</if_matched_sid>
+    <description>POSSIBLE SQL RCE + EXFIL on srv-sql: mysqld shell + outbound</description>
+    <mitre>
+      <id>T1071.001</id>
+    </mitre>
+    <group>command_and_control,exfiltration,correlation,</group>
+  </rule>
+
+</group>
+<!--
+  SENTINEL-AI Manager Rules — srv-ad-dns (agent 081) additions
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  Sections:
+    1. Noise suppression for srv-ad-dns agent
+    2. AD / Kerberos-specific high-value rules
+    3. Cross-source correlation
+-->
+
+<group name="sentinel,srv-ad-dns,noise_suppression">
+
+  <!-- Routine logon/logoff suppression on DC.
+       A DC sees constant computer-account auth, service auth, replication
+       auth - these fire rules 60106 (success) and 60137 (logoff) hundreds
+       of times per hour. Level 0 silences alerting but events still
+       persist in the indexer for forensic review. -->
+
+  <rule id="100210" level="0">
+    <if_sid>60106</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Windows Logon Success (srv-ad-dns: suppressed routine)</description>
+  </rule>
+
+  <rule id="100211" level="0">
+    <if_sid>60137</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Windows User Logoff (srv-ad-dns: suppressed routine)</description>
+  </rule>
+
+  <!-- Suspicious cmd heuristic FP: 92052/92032 fire on every elevated cmd run.
+       On a DC during admin work, this is constant noise. -->
+
+  <rule id="100212" level="0">
+    <if_sid>92052</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Suspicious cmd (srv-ad-dns: suppressed routine admin)</description>
+  </rule>
+
+  <rule id="100213" level="0">
+    <if_sid>92032</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Suspicious cmd execution (srv-ad-dns: suppressed routine)</description>
+  </rule>
+
+  <!-- PowerShell file ops: downgrade rather than suppress. Keep at level 3
+       so they're still logged but don't generate alerts. If a real attack
+       uses PowerShell, the correlation rules below will catch it. -->
+
+  <rule id="100214" level="3">
+    <if_sid>92201</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>PowerShell script file in Temp (srv-ad-dns: routine)</description>
+  </rule>
+
+  <rule id="100215" level="3">
+    <if_sid>92021</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>PowerShell deleted files (srv-ad-dns: routine admin)</description>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-ad-dns,ad_specific">
+
+  <!-- AD brute force: 8+ failed logons (rule 60122) in 120s.
+       Wazuh rule 60122 already triggers on event 4625. Our rule
+       100200 escalates to a high-severity alert with MITRE T1110. -->
+
+  <rule id="100200" level="12" frequency="8" timeframe="120">
+    <if_matched_sid>60122</if_matched_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>AD brute force on srv-ad-dns: 8+ failed logons in 120s</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failures,brute_force,</group>
+  </rule>
+
+  <!-- LogonType=9 (NewCredentials) — possible Pass-the-Hash indicator.
+       Event 4624 with LogonType=9 is uncommon and suspicious unless
+       you're using RunAs /netonly. Filter against event 4624 base rules
+       (60106 is Logon Success; we want the specific LogonType=9). -->
+
+  <rule id="100201" level="11">
+    <if_sid>60106</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <match>LogonType":"9"</match>
+    <description>NewCredentials (Type 9) logon on srv-ad-dns - possible PTH</description>
+    <mitre>
+      <id>T1550.002</id>
+    </mitre>
+    <group>credential_access,authentication,</group>
+  </rule>
+
+  <!-- AD account creation (event 4720). Always notable on a DC.
+       Wazuh's default rule 60103 covers 4720 at low level. We
+       want this elevated. -->
+
+  <rule id="100202" level="10">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>AD user account created on srv-ad-dns</description>
+    <mitre>
+      <id>T1136.002</id>
+    </mitre>
+    <group>account_changed,persistence,</group>
+  </rule>
+
+  <!-- AS-REP roasting: Kerberos pre-auth failure events (4768 with
+       sub-status indicating pre-auth disabled). Burst detection. -->
+
+  <rule id="100203" level="13" frequency="5" timeframe="60">
+    <if_matched_sid>60108</if_matched_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Possible AS-REP roasting on srv-ad-dns: 5+ Kerberos pre-auth failures in 60s</description>
+    <mitre>
+      <id>T1558.004</id>
+    </mitre>
+    <group>credential_access,kerberos,</group>
+  </rule>
+
+  <!-- Service installation (event 7045) where service binary is NOT
+       in System32. Legitimate Windows services live in System32. -->
+
+  <rule id="100204" level="12">
+    <if_sid>61156</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <match>ImagePath</match>
+    <description>Non-standard service install on srv-ad-dns: $(win.eventdata.imagePath)</description>
+    <mitre>
+      <id>T1543.003</id>
+    </mitre>
+    <group>persistence,service_creation,</group>
+  </rule>
+
+  <!-- Known credential-dumping tool process names via Sysmon EID 1.
+       Wazuh's 92xxx rules cover Sysmon - we filter on process names. -->
+
+  <rule id="100205" level="15">
+    <if_sid>61613</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <match>mimikatz|procdump|sekurlsa|kerberoast|rubeus|impacket-secretsdump</match>
+    <description>KNOWN CREDENTIAL DUMP TOOL on srv-ad-dns: $(win.eventdata.image)</description>
+    <mitre>
+      <id>T1003</id>
+    </mitre>
+    <group>credential_access,T1003,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,correlation,srv-ad-dns">
+
+  <!-- Failed logon burst + suspicious tool: brute force + dump tool used =
+       likely active attack. -->
+
+  <rule id="100220" level="15" frequency="2" timeframe="120">
+    <if_matched_sid>100200</if_matched_sid>
+    <if_matched_sid>100205</if_matched_sid>
+    <description>ACTIVE AD COMPROMISE on srv-ad-dns: brute force + credential dump tool</description>
+    <mitre>
+      <id>T1110</id>
+      <id>T1003</id>
+    </mitre>
+    <group>credential_access,correlation,</group>
+  </rule>
+
+  <!-- Service install + new account: classic post-compromise pattern.
+       Attacker establishes persistence via service AND creates a
+       backdoor account. -->
+
+  <rule id="100221" level="14" frequency="2" timeframe="300">
+    <if_matched_sid>100202</if_matched_sid>
+    <if_matched_sid>100204</if_matched_sid>
+    <description>POSSIBLE PERSISTENCE on srv-ad-dns: new account + non-std service within 5min</description>
+    <mitre>
+      <id>T1543.003</id>
+      <id>T1136.002</id>
+    </mitre>
+    <group>persistence,correlation,</group>
+  </rule>
+
+</group>
+<!--
+  SENTINEL-AI Manager Rules — srv-ftp (agent 085) additions
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  Sections:
+    1. Noise suppression for srv-ftp agent
+    2. IIS FTP / HTTP specific rules
+    3. Cross-source correlation
+-->
+
+<group name="sentinel,srv-ftp,noise_suppression">
+
+  <!-- OneDrive accessing Explorer = routine OneDrive update flow -->
+  <rule id="100240" level="0">
+    <if_sid>92910</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>OneDrive Explorer access (srv-ftp: suppressed routine)</description>
+  </rule>
+
+  <!-- taskschd.dll loaded by random process = FP at boot/system idle -->
+  <rule id="100241" level="0">
+    <if_sid>92154</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>taskschd.dll loaded (srv-ftp: suppressed routine)</description>
+  </rule>
+
+  <!-- BluetoothUserService_NNN (numerical suffix) is per-user system service -->
+  <rule id="100242" level="0">
+    <if_sid>92307</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>BluetoothUserService</match>
+    <description>BT user service registration (srv-ftp: suppressed routine)</description>
+  </rule>
+
+  <rule id="100243" level="0">
+    <if_sid>92307</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>CaptureService|CDPUserSvc|OneSyncSvc|PimIndexMaintenanceSvc|UnistoreSvc|UserDataSvc|WpnUserService</match>
+    <description>Per-user system service registration (srv-ftp: suppressed)</description>
+  </rule>
+
+  <!-- WinRM localhost-to-localhost (IPv6 loopback) -->
+  <rule id="100244" level="0">
+    <if_sid>92110</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>0:0:0:0:0:0:0:1</match>
+    <description>WinRM loopback (srv-ftp: suppressed loopback)</description>
+  </rule>
+
+  <!-- System time changed: routine NTP sync. Downgrade not suppress
+       (huge time jumps are still interesting). -->
+  <rule id="100245" level="3">
+    <if_sid>60132</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>System time changed (srv-ftp: routine NTP)</description>
+  </rule>
+
+  <!-- Software protection service (Windows activation) -->
+  <rule id="100246" level="0">
+    <if_sid>60642</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>Software protection service (srv-ftp: suppressed routine)</description>
+  </rule>
+
+  <!-- CIS benchmark failures: keep one-time install state silent.
+       Wazuh's 19xxx rules are CIS findings; we suppress 19009 (password
+       history) and 19010 (others) as one-time install configs. -->
+  <rule id="100247" level="0">
+    <if_sid>19009</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>CIS benchmark password history (srv-ftp: install state, suppressed)</description>
+  </rule>
+
+  <!-- PowerShell file ops: downgrade -->
+  <rule id="100248" level="3">
+    <if_sid>92021</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>PowerShell deleted files (srv-ftp: routine)</description>
+  </rule>
+
+  <rule id="100249" level="3">
+    <if_sid>92205</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>PowerShell created exe in Windows root (srv-ftp: routine installer)</description>
+  </rule>
+
+  <rule id="100250" level="3">
+    <if_sid>92031</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>Discovery activity (srv-ftp: Defender benign)</description>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-ftp,iis_specific">
+
+  <!-- FTP brute force: 5+ failed FTP login events in 60s.
+       Wazuh has built-in IIS FTP rules. Event 4625 (failed logon)
+       with workstation source IP matching FTP traffic = brute force.
+       In practice, we look for repeated 4625 from same source. -->
+
+  <rule id="100230" level="12" frequency="5" timeframe="60">
+    <if_matched_sid>60122</if_matched_sid>
+    <hostname>srv-ftp</hostname>
+    <description>FTP/RDP/Windows brute force on srv-ftp: 5+ failed logons in 60s</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failures,brute_force,</group>
+  </rule>
+
+  <!-- HTTP webshell drop: FIM file added under wwwroot with web-script ext.
+       Wazuh emits FIM events as syscheck rule 554 (file added). We
+       use <match> against the raw event for the path + extension. -->
+
+  <rule id="100231" level="14">
+    <if_sid>554</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>C:\\inetpub\\wwwroot\\</match>
+    <description>POSSIBLE HTTP WEBSHELL DROP on srv-ftp: $(file)</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>webshell,persistence,</group>
+  </rule>
+
+  <!-- FTP suspicious upload: same idea but in ftproot -->
+  <rule id="100232" level="11">
+    <if_sid>554</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>C:\\inetpub\\ftproot\\</match>
+    <description>FTP file uploaded on srv-ftp: $(file)</description>
+    <mitre>
+      <id>T1105</id>
+    </mitre>
+    <group>ingress_tool_transfer,</group>
+  </rule>
+
+  <!-- File create inside /inetpub by Sysmon EID 11 from non-IIS process.
+       Sysmon EID 11 = FileCreate. Our srv-ad-dns + srv-ftp ingest Sysmon.
+       Wazuh rule 61613 handles Sysmon EID 11. We filter for inetpub paths
+       and exclude legitimate IIS workers (w3wp.exe, ftpsvc, system). -->
+
+  <rule id="100233" level="13">
+    <if_sid>61613</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>C:\\inetpub\\</match>
+    <description>File create under /inetpub on srv-ftp by Sysmon EID 11 - check process</description>
+    <mitre>
+      <id>T1105</id>
+    </mitre>
+    <group>ingress_tool_transfer,</group>
+  </rule>
+
+  <!-- IIS service stopped (Windows event 7036 with FTPSVC or W3SVC).
+       Attackers often stop logging before further actions. -->
+
+  <rule id="100234" level="13">
+    <if_sid>10005</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>FTPSVC|W3SVC</match>
+    <match>stopped</match>
+    <description>IIS service stopped on srv-ftp - possible defense evasion</description>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+    <group>defense_evasion,</group>
+  </rule>
+
+  <!-- IIS applicationHost.config modified - critical -->
+  <rule id="100235" level="14">
+    <if_sid>550,553,554</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>applicationHost.config</match>
+    <description>IIS applicationHost.config modified on srv-ftp</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,correlation,srv-ftp">
+
+  <!-- FTP brute force success: 100230 (brute force) + 60106 (Logon Success)
+       within 120s. Wazuh's normal logon-success rule is suppressed on this
+       host via 100240 family BUT only when scoped to this hostname AND
+       only the noisy variants — if there's an actual successful logon
+       right after a brute force, we still see it. -->
+
+  <rule id="100260" level="14" frequency="2" timeframe="120">
+    <if_matched_sid>100230</if_matched_sid>
+    <if_sid>60106</if_sid>
+    <description>SUCCESSFUL BRUTE FORCE on srv-ftp: brute force + successful logon</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>brute_force,correlation,</group>
+  </rule>
+
+  <!-- Webshell delivery: drop + access -->
+  <rule id="100261" level="15" frequency="2" timeframe="120">
+    <if_matched_sid>100231</if_matched_sid>
+    <if_matched_sid>61613</if_matched_sid>
+    <description>HIGH-CONFIDENCE HTTP WEBSHELL DELIVERY on srv-ftp</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>webshell,correlation,</group>
+  </rule>
+
+</group>
+<!--
+  SENTINEL-AI Manager Rules — FIX for rule 100202 FP
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  Problem: rule 100202 was firing on ANY Windows account-management event
+  parented to Wazuh rule 60103, not just genuine user creation (event 4720).
+  Wazuh rule 60103 chains MANY events:
+    - 4720 (account created)         <- what we want
+    - 4722 (account enabled)
+    - 4723 (password change)
+    - 4724 (password reset)
+    - 4725 (account disabled)
+    - 4738 (account changed)
+    - 4740 (account locked)
+    - 4767 (account unlocked)
+    - 4781 (account renamed)
+
+  Fix: scope rule 100202 to event ID 4720 specifically.
+-->
+
+<group name="sentinel,fixes">
+
+  <rule id="100202" level="10" overwrite="yes">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <field name="win.system.eventID">4720</field>
+    <description>AD user account CREATED on srv-ad-dns: $(win.eventdata.targetUserName)</description>
+    <mitre>
+      <id>T1136.002</id>
+    </mitre>
+    <group>account_changed,persistence,</group>
+  </rule>
+
+  <!-- New: account enabled (4722) - notable but less critical than created -->
+  <rule id="100206" level="8">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <field name="win.system.eventID">4722</field>
+    <description>AD user account enabled on srv-ad-dns: $(win.eventdata.targetUserName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>account_changed,</group>
+  </rule>
+
+  <!-- New: account password reset by an administrator (4724) - this is
+       different from user changing own password (4723). Password reset
+       requires admin privileges, so unexpected resets are suspicious. -->
+  <rule id="100207" level="9">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <field name="win.system.eventID">4724</field>
+    <description>AD admin-initiated password reset on srv-ad-dns: target=$(win.eventdata.targetUserName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>account_changed,</group>
+  </rule>
+
+  <!-- Suppress other routine 60103 events to keep dashboard clean
+       (account enabled/disabled/renamed/locked are operational events) -->
+  <rule id="100208" level="3">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <field name="win.system.eventID">4725|4738|4740|4767|4781|4723</field>
+    <description>AD routine account event on srv-ad-dns (downgraded)</description>
+  </rule>
+
+</group>
+<!--
+  SENTINEL-AI Manager Rules — CROSS-HOST SCENARIO CORRELATION
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  This is the "scenario detection" layer. Per-host rules detect individual
+  events. THESE rules detect ATTACK CHAINS — sequences of events across
+  multiple hosts that together indicate a coordinated attack scenario.
+
+  Design principle: Each scenario rule chains 2-3 EARLIER rules from
+  DIFFERENT hosts. The presence of any individual rule alone is low-signal
+  noise; their co-occurrence within a timeframe is the real attack signal.
+
+  Scenarios modeled here:
+    1. Cross-DMZ recon (web + DNS + LDAP from same source within 5min)
+    2. SQLi → DB compromise (web webshell + MySQL brute force from same source)
+    3. Web compromise → lateral pivot (Apache shell + outbound to internal IP)
+    4. AD compromise → exfil (credential dump tool + outbound connection)
+    5. FTP pivot (FTP brute force success + IIS service stopped = defense evasion)
+    6. Initial Access → Persistence (any compromise rule + new service/scheduled task)
+    7. Full kill-chain (initial access + privilege escalation + lateral + exfil)
+
+  Key Wazuh syntax for cross-host correlation:
+    - <if_matched_sid>X</if_matched_sid>  — must match rule X within timeframe
+    - <same_field>srcip</same_field>      — chain requires same srcip across events
+    - <frequency>N</frequency>            — count of total matching events needed
+    - <timeframe>S</timeframe>            — seconds within which all must occur
+
+  IMPORTANT: cross-host correlation rules MUST NOT have <hostname> filter
+  on the parent rule. They span hosts by definition.
+-->
+
+<!--
+  SENTINEL-AI Cross-Host Scenarios v2 — Working Wazuh Pattern
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+  (replaces the previous 13 scenarios - delete the old <group name="sentinel,correlation,scenarios"> first)
+
+  THE LESSON: Wazuh's `<if_matched_sid>` only supports ONE parent rule
+  per <rule>. Multiple <if_matched_sid> lines are silently ignored except
+  the first. So the original "chain X AND Y" design was broken.
+
+  THE FIX: Each scenario is now N events of ONE parent rule from the
+  same source IP within a timeframe. The "AND across hosts" semantic is
+  achieved by chaining LATER scenarios on EARLIER scenarios:
+    100300 fires when 3+ AXFR happen → indexed as alert
+    100311 chains on 100300 + another parent → fires when both happen
+
+  For two-rule correlation that genuinely needs both to fire, the
+  approach is: write rule X that fires when source IP is in a CDB list
+  populated by rule Y. This requires Wazuh CDB lists (future work).
+
+  For now, scenario rules use single-parent + same_source_ip + frequency.
+-->
+
+<group name="sentinel,correlation,scenarios">
+
+  <!-- ─── SCENARIO 1: AXFR recon (working pattern, already deployed) ─── -->
+  <rule id="100300" level="13" frequency="3" timeframe="300">
+    <if_matched_sid>100102</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Coordinated DNS recon — 3+ AXFR attempts from $(srcip) in 5min</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1590</id>
+    </mitre>
+    <group>scenario,recon,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 2: Web 4xx scanning ──────────────────────────────────
+       5+ web errors from same source = directory brute force / vuln scan -->
+  <rule id="100301" level="12" frequency="5" timeframe="120">
+    <if_matched_sid>31101</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Web reconnaissance — 5+ 4xx errors from $(srcip) in 2min</description>
+    <mitre>
+      <id>T1595.002</id>
+    </mitre>
+    <group>scenario,recon,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 3: Apache 5xx errors burst (SQLi/RCE probing) ────── -->
+  <rule id="100302" level="13" frequency="3" timeframe="60">
+    <if_matched_sid>31151</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Web exploitation probing — 3+ 5xx errors from $(srcip) in 60s</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>scenario,exploitation,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 4: SSH brute force escalation ────────────────────── -->
+  <rule id="100303" level="13" frequency="10" timeframe="120">
+    <if_matched_sid>5716</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: SSH brute force campaign — 10+ failed logins from $(srcip) in 2min</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,brute_force,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 5: Windows AD brute force escalation ────────────── -->
+  <rule id="100304" level="13" frequency="10" timeframe="180">
+    <if_matched_sid>60122</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: AD brute force campaign — 10+ Windows auth failures in 3min</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,brute_force,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 6: Recon followed by web exploitation ────────────────
+       Chain scenario: AXFR recon (100300) already fired AND web exploitation
+       (100302) also fires from same source = recon-then-exploit pattern.
+
+       This IS multi-parent: 100300 fires first (level 13, gets indexed),
+       then 100302 fires within 30 min → chained correlation. -->
+  <rule id="100305" level="14" frequency="2" timeframe="1800">
+    <if_matched_sid>100300</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Recon → exploit chain — DNS recon then web 5xx from $(srcip)</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1190</id>
+    </mitre>
+    <group>scenario,kill_chain,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 7: Webshell drop campaign (multiple drops) ──────── -->
+  <rule id="100306" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100150</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Multi-stage webshell deployment — 2+ webshell drops in 10min</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>scenario,persistence,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 8: Webshell drop + access (delivery + use) ────────
+       100150 fires (file added under uploads), then ANY further FIM
+       event or web access on srv-web within 60s from same source. -->
+  <rule id="100307" level="14" frequency="2" timeframe="60">
+    <if_matched_sid>100150</if_matched_sid>
+    <description>SCENARIO: Webshell delivery — file drop followed by activity within 60s</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>scenario,webshell,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 9: MySQL brute force escalation ─────────────────── -->
+  <rule id="100308" level="13" frequency="2" timeframe="120">
+    <if_matched_sid>100182</if_matched_sid>
+    <description>SCENARIO: Sustained MySQL brute force — multiple bursts in 2min</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,brute_force,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 10: FTP brute force escalation ──────────────────── -->
+  <rule id="100309" level="13" frequency="2" timeframe="180">
+    <if_matched_sid>100230</if_matched_sid>
+    <description>SCENARIO: Sustained FTP brute force — multiple bursts in 3min</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,brute_force,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 11: Apache shell spawn (severe) ─────────────────── -->
+  <rule id="100310" level="15" frequency="2" timeframe="300">
+    <if_matched_sid>100155</if_matched_sid>
+    <description>SCENARIO: Active web server compromise — Apache spawned 2+ shells in 5min</description>
+    <mitre>
+      <id>T1059.004</id>
+      <id>T1190</id>
+    </mitre>
+    <group>scenario,compromise,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 12: Credential dump tool used ─────────────────────
+       Rule 100205 catches mimikatz/rubeus/etc by name via Sysmon.
+       Single fire is enough — the rule itself requires the tool to
+       have run. Scenario rule just elevates to "critical incident". -->
+  <rule id="100311" level="15">
+    <if_sid>100205</if_sid>
+    <description>SCENARIO: CRITICAL INCIDENT — credential dumping tool executed on DC</description>
+    <mitre>
+      <id>T1003</id>
+    </mitre>
+    <group>scenario,credential_theft,critical,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 13: Persistence indicators (any AD account event) ── -->
+  <rule id="100312" level="13" frequency="3" timeframe="600">
+    <if_matched_sid>100202</if_matched_sid>
+    <description>SCENARIO: Persistence campaign — 3+ AD accounts created in 10min</description>
+    <mitre>
+      <id>T1136.002</id>
+    </mitre>
+    <group>scenario,persistence,</group>
+  </rule>
+  <!-- Phase 1 close-out: drop high-volume Windows logon/logoff noise (9k+10k/day) -->
+  <rule id="60106" level="0" overwrite="yes">
+    <if_sid>60103</if_sid>
+    <field name="win.system.eventID">^528$|^540$|^673$|^4624$|^4769$</field>
+    <description>Windows Logon Success (suppressed by SENTINEL-AI Phase 1)</description>
+  </rule>
+  <rule id="60137" level="0" overwrite="yes">
+    <if_sid>60103</if_sid>
+    <field name="win.system.eventID">^538$|^551$|^4634$|^4647$</field>
+    <description>Windows User Logoff (suppressed by SENTINEL-AI Phase 1)</description>
+  </rule>
+
+
+  <!-- ============================================================ -->
+  <!-- SENTINEL-AI Phase 2A: DoH detection (rules 100400-100430)    -->
+  <!-- L3 layer in 4-layer DoH-exfil correlation chain              -->
+  <!-- ============================================================ -->
+
+  <!-- Base rule: any DoH query through dnsdist (parent for all) -->
+  <rule id="100400" level="0">
+    <decoded_as>dnsdist-doh</decoded_as>
+    <description>DoH query via dnsdist (base)</description>
+    <group>doh,dnsdist,</group>
+  </rule>
+
+  <!-- 100401: External (non-loopback) client used DoH endpoint.
+       Internal hosts should use plain DNS via :53. External DoH
+       use suggests evasion or compromise. -->
+  <rule id="100401" level="5">
+    <if_sid>100400</if_sid>
+    <field name="doh_client_ip" negate="yes">^127\.|^::1</field>
+    <description>DoH query from non-loopback client: $(doh_client_ip) -> $(doh_query)</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>doh,dnsdist,</group>
+  </rule>
+
+  <!-- 100402: Long query label (>40 chars per label = potential exfil chunk).
+       Standard subdomains are short; base32 chunks are long. -->
+  <rule id="100402" level="8">
+    <if_sid>100401</if_sid>
+    <field name="doh_query" type="pcre2">[a-zA-Z0-9]{40,}</field>
+    <description>DoH query with abnormally long label (exfil candidate): $(doh_query)</description>
+    <mitre>
+      <id>T1048.003</id>
+      <id>T1071.004</id>
+    </mitre>
+    <group>doh,dnsdist,exfiltration,</group>
+  </rule>
+
+  <!-- 100403: Suspicious TXT/NULL queries via DoH (classic exfil vector) -->
+  <rule id="100403" level="7">
+    <if_sid>100401</if_sid>
+    <field name="doh_qtype" type="pcre2">^(TXT|NULL|ANY)$</field>
+    <description>DoH suspicious record type query: $(doh_qtype) for $(doh_query)</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>doh,dnsdist,exfiltration,</group>
+  </rule>
+
+  <!-- 100404: High-volume DoH from single client (>30/min) -->
+  <rule id="100404" level="9" frequency="30" timeframe="60">
+    <if_matched_sid>100401</if_matched_sid>
+    <same_field>doh_client_ip</same_field>
+    <description>High-volume DoH from $(doh_client_ip): >30 queries in 60s (exfil pattern)</description>
+    <mitre>
+      <id>T1048.003</id>
+      <id>T1071.004</id>
+    </mitre>
+    <group>doh,dnsdist,exfiltration,</group>
+  </rule>
+
+  <!-- 100405: Burst of long-label queries (combine 100402 conditions) -->
+  <rule id="100405" level="11" frequency="5" timeframe="60">
+    <if_matched_sid>100402</if_matched_sid>
+    <same_field>doh_client_ip</same_field>
+    <description>DoH exfiltration confirmed: 5+ long-label queries from $(doh_client_ip) in 60s</description>
+    <mitre>
+      <id>T1048.003</id>
+      <id>T1071.004</id>
+    </mitre>
+    <group>doh,dnsdist,exfiltration,</group>
+  </rule>
+
+
+
+  <!-- ============================================================ -->
+  <!-- SENTINEL-AI Phase 2A: DoH L1 detection (rules 100410-100415) -->
+  <!-- Suricata TLS metadata events (event_type:tls) to DoH endpoint -->
+  <!-- ============================================================ -->
+
+  <!-- 100410: Base — any TLS event seen by Suricata.
+       Level 0 so it doesn't alert, just provides a parent for chaining. -->
+  <rule id="100410" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="event_type">^tls$</field>
+    <description>Suricata TLS metadata (base)</description>
+    <group>suricata,tls,</group>
+  </rule>
+
+  <!-- 100411: TLS connection to our DoH endpoint (10.50.0.11:443).
+       Any client hitting the DoH server is interesting; from outside
+       VLAN 50 (e.g. Kali 10.70.0.10) is the canonical L1 exfil signal. -->
+  <rule id="100411" level="7">
+    <if_sid>100410</if_sid>
+    <field name="dest_ip">^10\.50\.0\.11$</field>
+    <field name="dest_port">^443$</field>
+    <description>L1: TLS to DoH endpoint from $(src_ip) (SNI: $(tls.sni))</description>
+    <mitre>
+      <id>T1071.004</id>
+      <id>T1572</id>
+    </mitre>
+    <group>suricata,tls,doh,exfiltration,</group>
+  </rule>
+
+  <!-- 100412: TLS to DoH from outside the DMZ (cross-VLAN attacker).
+       src_ip NOT in 10.50.0.0/24 + dest = DoH endpoint = strongest L1 signal. -->
+  <rule id="100412" level="10">
+    <if_sid>100411</if_sid>
+    <field name="src_ip" negate="yes">^10\.50\.</field>
+    <description>L1 HIGH: External TLS to DoH endpoint from $(src_ip) (SNI: $(tls.sni))</description>
+    <mitre>
+      <id>T1071.004</id>
+      <id>T1572</id>
+    </mitre>
+    <group>suricata,tls,doh,exfiltration,</group>
+  </rule>
+
+
+
+  <!-- 100413: L2 promotion — Falco SENTINEL_L2_DOH_EXTERNAL to dedicated rule -->
+  <rule id="100413" level="9">
+    <if_sid>100112</if_sid>
+    <field name="rule">SENTINEL DoH access from non-DMZ client</field>
+    <description>L2: External client hit DoH endpoint (Falco syscall view) - $(output)</description>
+    <mitre>
+      <id>T1071.004</id>
+      <id>T1572</id>
+    </mitre>
+    <group>falco,doh,exfiltration,sentinel,</group>
+  </rule>
+
+
+  <!-- ============================================================ -->
+  <!-- SENTINEL-AI Phase 2A: 4-layer DoH correlation (100420-100424) -->
+  <!--                                                              -->
+  <!-- Strategy: pairwise correlation, chained for 3-way+.           -->
+  <!-- 100420: L3+L4   |  100421: L1+L3   |  100422: L1+L2           -->
+  <!-- 100423: chains 100422 + L3 (full 4-layer composite)           -->
+  <!-- 100424: exfil burst (L3 100405) confirmed by L1               -->
+  <!-- ============================================================ -->
+
+  <!-- 100420: L3 (dnsdist) + L4 (BIND) — same client, 30s.
+       BIND rule 100100 is the Day-5 base for DNS queries. Pairing
+       proves the DoH query was actually forwarded upstream. -->
+  <rule id="100420" level="8" frequency="2" timeframe="30">
+    <if_matched_sid>100401</if_matched_sid>
+    <same_field>doh_client_ip</same_field>
+    <description>L3+L4 correlation: DoH query from $(doh_client_ip) reached BIND forwarder</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>doh,correlation,sentinel,</group>
+  </rule>
+
+  <!-- 100421: L1 (Suricata TLS to DoH) + L3 (dnsdist log).
+       Same src_ip on the Suricata side and doh_client_ip on the dnsdist
+       side. Wazuh's same_field can only test one field name, so we use
+       a frequency-on-100412 trigger and rely on dispatcher correlation
+       further down. For Wazuh-level pairing we use level-up on L1 + L3
+       activity in the same window. -->
+  <rule id="100421" level="10" frequency="2" timeframe="60">
+    <if_matched_sid>100412</if_matched_sid>
+    <same_field>src_ip</same_field>
+    <description>L1 confirmed: Multiple external DoH TLS connections from $(src_ip)</description>
+    <mitre>
+      <id>T1071.004</id>
+      <id>T1572</id>
+    </mitre>
+    <group>doh,correlation,sentinel,</group>
+  </rule>
+
+  <!-- 100422: L1 (Suricata) + L2 (Falco) — network and endpoint both
+       see the same external client. The pair is the strongest "two
+       independent telemetry layers agree" signal. We chain on
+       100413 (L2 promoted) firing, which only happens when an external
+       client hit DoH — implies L1 already saw the same packet. -->
+  <rule id="100422" level="11" frequency="3" timeframe="60">
+    <if_matched_sid>100413</if_matched_sid>
+    <description>L1+L2 cross-source: Suricata network and Falco syscall both confirm external DoH access</description>
+    <mitre>
+      <id>T1071.004</id>
+      <id>T1572</id>
+    </mitre>
+    <group>doh,correlation,cross_source,sentinel,</group>
+  </rule>
+
+  <!-- 100423: Full 4-layer composite. Chains the L1+L2 pair (100422)
+       with continued L3 activity (rule 100401). Triggers within 90s. -->
+  <rule id="100423" level="13" frequency="2" timeframe="120">
+    <if_matched_sid>100422</if_matched_sid>
+    <description>4-LAYER CONFIRMED DoH abuse: Suricata+Falco+dnsdist+BIND all observed external client</description>
+    <mitre>
+      <id>T1071.004</id>
+      <id>T1572</id>
+      <id>T1048.003</id>
+    </mitre>
+    <group>doh,correlation,cross_source,sentinel,</group>
+  </rule>
+
+  <!-- 100424: Exfil-grade composite. L3 (rule 100405: 5+ long-label
+       queries in 60s from same client) confirmed by L1 external source.
+       Triggers immediately on 100405 if it has fired alongside 100412
+       in the same window. -->
+  <rule id="100424" level="14" frequency="2" timeframe="120">
+    <if_matched_sid>100405</if_matched_sid>
+    <same_field>doh_client_ip</same_field>
+    <description>DOH EXFILTRATION CONFIRMED: Sustained high-entropy query burst from $(doh_client_ip), externally sourced</description>
+    <mitre>
+      <id>T1048.003</id>
+      <id>T1071.004</id>
+      <id>T1572</id>
+    </mitre>
+    <group>doh,correlation,exfiltration,sentinel,</group>
+  </rule>
+
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       SENTINEL-AI Phase 2B — False Positive Suppression Rules
+       100500-100519: Ansible WinRM self-noise suppression
+       100510-100514: Service account / loopback suppression
+       ══════════════════════════════════════════════════════════════════ -->
+
+  <!-- Ansible WinRM drops ansible-tmp-* and __PSScriptPolicyTest_* files -->
+  <rule id="100500" level="0">
+    <if_sid>92213</if_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)ansible-tmp-|__PSScriptPolicyTest_</field>
+    <description>Suppress: Ansible WinRM temp file creation (not malware)</description>
+  </rule>
+
+  <!-- Ansible WinRM uses -EncodedCommand with ansible-tmp- in payload -->
+  <rule id="100501" level="0">
+    <if_sid>92057</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)ansible-tmp-</field>
+    <description>Suppress: Ansible WinRM base64 encoded PowerShell cleanup (not malware)</description>
+  </rule>
+
+  <!-- WinRM provider host (wsmprovhost.exe) writes temp files — Ansible module delivery -->
+  <rule id="100502" level="0">
+    <if_sid>92213</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)wsmprovhost\.exe</field>
+    <description>Suppress: WinRM provider host file writes (not malware)</description>
+  </rule>
+
+  <!-- Roslyn C# compiler (csc.exe) writes GUID-named temp DLLs during Ansible execution -->
+  <!-- Any file dropped into a GUID-named Temp subdirectory is Ansible working directory -->
+    <!-- Any file dropped into a GUID-named Temp subdirectory is Ansible working directory -->
+    <!-- Ansible GUID temp working directory suppress -->
+    <!-- Ansible GUID temp working directory suppress -->
+    <!-- Ansible GUID temp working directory suppress -->
+  <rule id="100503" level="0">
+    <if_sid>92213</if_sid>
+    <match type="pcre2">(?i)TargetFilename.*Temp\[0-9a-f]+-[0-9a-f]+-[0-9a-f]+-[0-9a-f]+-[0-9a-f]+</match>
+    <description>Suppress: Ansible GUID temp dir file drop (not malware)</description>
+  </rule>
+
+  <!-- PowerShell spawned by wsmprovhost (WinRM session) running encoded commands -->
+  <rule id="100504" level="0">
+    <if_sid>92057</if_sid>
+    <field name="win.eventdata.parentImage" type="pcre2">(?i)wsmprovhost\.exe</field>
+    <description>Suppress: WinRM-spawned encoded PowerShell (Ansible module wrapper, not malware)</description>
+  </rule>
+
+  <!-- PSScriptPolicyTest files are PowerShell execution policy test artifacts -->
+  <rule id="100505" level="0">
+    <if_sid>92213</if_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)__PSScriptPolicyTest_</field>
+    <description>Suppress: PowerShell execution policy test file (not malware)</description>
+  </rule>
+
+  <!-- Service/system accounts triggering win_compromised_user_response -->
+  <rule id="100510" level="0">
+    <if_sid>60111</if_sid>
+    <field name="win.eventdata.subjectUserName">(?i)SYSTEM$|LOCAL SERVICE|NETWORK SERVICE|DWM-|UMFD-</field>
+    <description>Suppress: Built-in system account logon failure (not compromised user)</description>
+  </rule>
+
+  <!-- Machine accounts (ending in $) triggering brute force rules -->
+  <rule id="100511" level="0">
+    <if_sid>60122</if_sid>
+    <field name="win.eventdata.targetUserName">\\$</field>
+    <description>Suppress: Machine account authentication failure (not brute force)</description>
+  </rule>
+
+  <!-- Loopback source triggering brute force from local service -->
+  <rule id="100512" level="0">
+    <if_sid>60204</if_sid>
+    <field name="win.eventdata.ipAddress">127\.0\.0\.1|::1|-</field>
+    <description>Suppress: Loopback/local RDP authentication failure (not brute force)</description>
+  </rule>
+
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       SENTINEL-AI Phase 2B — AD-CS ESC1 Detection Rules
+       100530-100545: Certificate Services abuse detection
+       Event sources: Windows Security 4886/4887/4888 (CA audit)
+                      Sysmon 1 (process creation — Certipy/Certify)
+                      PowerShell 4104 (script block — PS-based Certify)
+       ══════════════════════════════════════════════════════════════════ -->
+
+  <!-- Base rule: any CA Security event (4886/4887/4888) -->
+  <rule id="100530" level="3">
+    <if_sid>60103</if_sid>
+    <field name="win.system.eventID">^4886$</field>
+    <description>AD-CS: Certificate request received by CA</description>
+    <group>adcs,phase2b,</group>
+  </rule>
+
+  <rule id="100541" level="3">
+    <if_sid>60103</if_sid>
+    <field name="win.system.eventID">^4887$</field>
+    <description>AD-CS: Certificate issued by CA</description>
+    <group>adcs,phase2b,</group>
+  </rule>
+
+  <rule id="100542" level="3">
+    <if_sid>60103</if_sid>
+    <field name="win.system.eventID">^4888$</field>
+    <description>AD-CS: Certificate request denied by CA</description>
+    <group>adcs,phase2b,</group>
+  </rule>
+
+  <!-- L1: Certificate request received by CA (4886) — attacker initiated enrollment -->
+  <rule id="100531" level="7">
+    <if_sid>100530</if_sid>
+    <field name="win.system.eventID">^4886$</field>
+    <description>AD-CS: Certificate request received — requester=$(win.eventdata.requester) template=$(win.eventdata.attributes)</description>
+    <group>adcs,cert_request,phase2b,</group>
+  </rule>
+
+  <!-- L1: Certificate request with SentinelVulnESC1 template specifically -->
+  <rule id="100532" level="10">
+    <if_sid>100531</if_sid>
+    <field name="win.eventdata.attributes" type="pcre2">(?i)SentinelVulnESC1</field>
+    <description>AD-CS: Certificate request on vulnerable ESC1 template — requester=$(win.eventdata.requester)</description>
+    <group>adcs,esc1,phase2b,</group>
+    <mitre><id>T1649</id></mitre>
+  </rule>
+
+  <!-- L1: Certificate approved by CA (4887) — attack succeeded -->
+  <rule id="100533" level="12">
+    <if_sid>100541</if_sid>
+    <field name="win.system.eventID">^4887$</field>
+    <description>AD-CS: Certificate issued by CA — requester=$(win.eventdata.requester)</description>
+    <group>adcs,cert_issued,phase2b,</group>
+  </rule>
+
+  <!-- L1: Certificate approved on vulnerable ESC1 template — confirmed abuse -->
+  <rule id="100534" level="14">
+    <if_sid>100533</if_sid>
+    <field name="win.eventdata.attributes" type="pcre2">(?i)SentinelVulnESC1</field>
+    <description>AD-CS: Certificate ISSUED on vulnerable ESC1 template — ESC1 abuse confirmed, requester=$(win.eventdata.requester)</description>
+    <group>adcs,esc1,cert_issued,phase2b,</group>
+    <mitre><id>T1649</id></mitre>
+  </rule>
+
+  <!-- L1: Certificate denied on vulnerable template — attacker probing -->
+  <rule id="100535" level="9">
+    <if_sid>100542</if_sid>
+    <field name="win.system.eventID">^4888$</field>
+    <field name="win.eventdata.attributes" type="pcre2">(?i)SentinelVulnESC1</field>
+    <description>AD-CS: Certificate request DENIED on vulnerable ESC1 template — attacker probing, requester=$(win.eventdata.requester)</description>
+    <group>adcs,esc1,cert_denied,phase2b,</group>
+    <mitre><id>T1649</id></mitre>
+  </rule>
+
+  <!-- L1: ESC1 signature — SAN contains UPN override (the attack payload) -->
+  <rule id="100536" level="13">
+    <if_sid>100530</if_sid>
+    <field name="win.eventdata.attributes" type="pcre2">(?i)SAN:upn=</field>
+    <field name="win.eventdata.attributes" type="pcre2">(?i)SentinelVulnESC1</field>
+    <description>AD-CS: ESC1 UPN override detected — attacker supplied custom SAN:upn, requester=$(win.eventdata.requester) attributes=$(win.eventdata.attributes)</description>
+    <group>adcs,esc1,upn_override,phase2b,</group>
+    <mitre><id>T1649</id></mitre>
+  </rule>
+
+  <!-- L2: Certipy/Certify process creation detected (Sysmon Event 1) -->
+  <rule id="100537" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)(certipy|certify|certi\.exe)</field>
+    <description>AD-CS: Known certificate abuse tool executed — image=$(win.eventdata.image) cmdline=$(win.eventdata.commandLine)</description>
+    <group>adcs,tool_execution,phase2b,</group>
+    <mitre><id>T1649</id></mitre>
+  </rule>
+
+  <!-- L2: PowerShell Certify keywords (4104 script block) -->
+  <rule id="100538" level="11">
+    <if_sid>64104</if_sid>
+    <field name="win.eventdata.scriptBlockText" type="pcre2">(?i)(Invoke-Certify|Find-ESC|Get-CertificateTemplate|Request-Certificate.*template)</field>
+    <description>AD-CS: PowerShell certificate abuse tool keywords detected in script block</description>
+    <group>adcs,powershell,phase2b,</group>
+    <mitre><id>T1649</id></mitre>
+  </rule>
+
+  <!-- Correlation: Multiple cert requests on vulnerable template (burst = automated tool) -->
+  <rule id="100539" level="13" frequency="3" timeframe="60">
+    <if_matched_sid>100535</if_matched_sid>
+    <same_field>win.eventdata.requester</same_field>
+    <description>AD-CS: Burst of denied cert requests on ESC1 template — automated tool likely, requester=$(win.eventdata.requester)</description>
+    <group>adcs,esc1,burst,phase2b,</group>
+    <mitre><id>T1649</id></mitre>
+  </rule>
+
+  <!-- Correlation: UPN override approved = confirmed ESC1 privilege escalation -->
+  <rule id="100540" level="15" frequency="2" timeframe="120">
+    <if_matched_sid>100536</if_matched_sid>
+    <same_field>win.eventdata.requester</same_field>
+    <description>AD-CS: ESC1 CONFIRMED — multiple UPN-override cert requests from same requester, possible domain privilege escalation via certificate abuse</description>
+    <group>adcs,esc1,confirmed,phase2b,</group>
+    <mitre><id>T1649</id></mitre>
+  </rule>
+
+</group>

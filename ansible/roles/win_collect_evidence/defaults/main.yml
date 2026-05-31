@@ -1,0 +1,8 @@
+---
+evidence_incident_id: "unknown"
+evidence_target_ip: "{{ ansible_host | default('unknown') }}"
+evidence_dir: "C:\\SentinelEvidence"
+collect_network: true
+collect_memory: false
+collect_processes: true
+collect_event_log: true

@@ -1,0 +1,41 @@
+---
+- name: Validate username
+  ansible.builtin.fail:
+    msg: "disable_username is required"
+  when: disable_username == ""
+
+- name: Disable local account (if local)
+  ansible.windows.win_user:
+    name: "{{ disable_username }}"
+    account_disabled: yes
+    password_expired: yes
+  when: not dry_run | bool
+  ignore_errors: true
+
+- name: Try to disable AD account (works only on DCs / domain-joined)
+  ansible.windows.win_shell: |
+    if (Get-Module -ListAvailable -Name ActiveDirectory) {
+      Import-Module ActiveDirectory
+      Disable-ADAccount -Identity "{{ disable_username }}" -ErrorAction SilentlyContinue
+      Get-ADUser -Identity "{{ disable_username }}" -Properties Enabled |
+        Select-Object SamAccountName, Enabled |
+        ConvertTo-Json
+    } else {
+      "AD module not present; skipped" 
+    }
+  when: not dry_run | bool
+  changed_when: false
+  ignore_errors: true
+
+- name: Kick logged-on sessions for this user
+  ansible.windows.win_shell: |
+    quser | Where-Object { $_ -match "{{ disable_username }}" } | ForEach-Object {
+      $parts = $_ -split '\s+' | Where-Object { $_ }
+      $sid = $parts[2]
+      if ($sid -match '^\d+$') { logoff $sid }
+    }
+  when:
+    - not dry_run | bool
+    - disable_kick_sessions | bool
+  changed_when: false
+  ignore_errors: true

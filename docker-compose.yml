@@ -27,6 +27,8 @@ volumes:
     name: sentinel_ollama_models
   ml-models:
     name: sentinel_ml_models
+  sentinel_wazuh-manager-logs:
+    external: true
 
 services:
 
@@ -137,6 +139,8 @@ services:
       - USE_AGENTIC_CHAT=${USE_AGENTIC_CHAT:-false}
       - REDIS_HOST=sentinel-redis
       - REDIS_PORT=6379
+      - SENTINEL_FEEDBACK_PATH=/var/ossec/logs/sentinel_ai_decisions.json
+      - ANSIBLE_INVENTORY_PATH=/ansible/inventory/hosts.ini
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - POSTGRES_HOST=sentinel-postgres
       - POSTGRES_PORT=5432
@@ -149,6 +153,10 @@ services:
       - NVD_API_KEY=${NVD_API_KEY:-}
       - ML_MODELS_PATH=/models
       - ML_ANOMALY_CONTAMINATION=${ML_ANOMALY_CONTAMINATION:-0.05}
+      - ANSIBLE_AUTO_EXECUTE_LEVEL=${ANSIBLE_AUTO_EXECUTE_LEVEL:-10}
+      - ANSIBLE_DRY_RUN_BELOW_LEVEL=${ANSIBLE_DRY_RUN_BELOW_LEVEL:-7}
+      - DISPATCH_MIN_LEVEL=${DISPATCH_MIN_LEVEL:-5}
+      - DISPATCH_DEDUP_WINDOW_S=${DISPATCH_DEDUP_WINDOW_S:-60}
       - DISCOVERY_ENABLED=${DISCOVERY_ENABLED:-true}
       - DISCOVERY_INTERVAL_SECONDS=${DISCOVERY_INTERVAL_SECONDS:-300}
       - DISCOVERY_NETWORKS=${DISCOVERY_NETWORKS:-192.168.49.0/24}
@@ -166,6 +174,7 @@ services:
       - suricata-logs:/var/log/suricata:ro
       - ml-models:/models
       - /root/sentinel-ai-commander/ansible:/ansible
+      - sentinel_wazuh-manager-logs:/var/ossec/logs
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -182,4 +191,27 @@ services:
       - ANSIBLE_RUNNER_PORT=5001
       - ANSIBLE_BASE=/ansible
       - RUNNER_BASE=/ansible
-    volumes: [/root/sentinel-ai-commander/ansible:/ansible]
+      # Inventory watcher pulls live agent list from Wazuh
+      - WAZUH_API_URL=https://sentinel-wazuh-manager:55000
+      - WAZUH_API_USER=${WAZUH_API_USER:-wazuh-wui}
+      - WAZUH_API_PASSWORD=${WAZUH_API_PASSWORD}
+      - INVENTORY_PATH=/ansible/inventory/hosts.ini
+      - INVENTORY_INTERVAL=${INVENTORY_INTERVAL:-60}
+      - SSH_KEY_PATH=/ansible/keys/id_rsa
+      - WINDOWS_USER=${WINDOWS_USER:-}
+      - WINDOWS_PASSWORD=${WINDOWS_PASSWORD:-}
+      - LINUX_USER=${LINUX_USER:-louay}
+      - LINUX_USER_OVERRIDES=${LINUX_USER_OVERRIDES:-}
+      - LINUX_OS_OVERRIDES=${LINUX_OS_OVERRIDES:-}
+      - AGENT_IP_OVERRIDES=${AGENT_IP_OVERRIDES:-}
+      - LINUX_BECOME_PASSWORD=${LINUX_BECOME_PASSWORD:-}
+      - WINDOWS_USER_OVERRIDES=${WINDOWS_USER_OVERRIDES:-}
+      - WINDOWS_PASSWORD_OVERRIDES=${WINDOWS_PASSWORD_OVERRIDES:-}
+      # Path overrides for entrypoint script
+      - DYN_INV_BIN=/ansible/dynamic_inventory.py
+      - RUNNER_API_BIN=/app/runner_api.py
+      - RUNNER_WORKDIR=/app
+    volumes:
+      - /root/sentinel-ai-commander/ansible:/ansible
+      - /root/sentinel-ai-commander/scripts/inventory_watcher_entrypoint.sh:/usr/local/bin/sentinel_entrypoint.sh:ro
+    entrypoint: ["/bin/bash", "/usr/local/bin/sentinel_entrypoint.sh"]

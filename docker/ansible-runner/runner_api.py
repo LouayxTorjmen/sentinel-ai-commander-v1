@@ -16,7 +16,9 @@ ANSIBLE_BASE = os.getenv("ANSIBLE_BASE", "/ansible")
 RUNNER_BASE  = os.getenv("RUNNER_BASE", "/ansible")
 
 ALLOWED_PLAYBOOKS = {
+    # Linux playbooks
     "incident_response",
+    "block_dns_exfil",
     "brute_force_response",
     "malware_containment",
     "lateral_movement_response",
@@ -25,6 +27,21 @@ ALLOWED_PLAYBOOKS = {
     "compromised_user_response",
     "permissions_restore_response",
     "fim_restore_response",
+    # Windows playbooks
+    "win_incident_response",
+    "win_brute_force_response",
+    "win_malware_containment",
+    "win_lateral_movement_response",
+    "win_vulnerability_patch",
+    "win_file_quarantine",
+    "win_compromised_user_response",
+    "win_permissions_restore_response",
+    "win_fim_restore_response",
+    "block_adcs_abuse",
+    "harden_nginx_tls",
+    "mysql_credential_response",
+    "block_ip",
+    "block_dns_exfil",
 }
 
 @app.route("/health", methods=["GET"])
@@ -52,6 +69,7 @@ def run_playbook():
         runner_args = {
             "private_data_dir": RUNNER_BASE,
             "playbook": playbook_path,
+            "inventory": f"{ANSIBLE_BASE}/inventory/hosts.ini",
             "extravars": extra_vars,
             "quiet": False,
         }

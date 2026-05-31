@@ -1,0 +1,27 @@
+---
+- name: SENTINEL-AI — Compromised User Response (Windows)
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+  become: false
+
+  pre_tasks:
+    - name: Require username
+      ansible.builtin.fail:
+        msg: "username is required"
+      when: username == ""
+
+  roles:
+    - role: win_collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+
+    - role: win_disable_user
+      vars:
+        disable_username: "{{ username }}"
+
+    - role: win_notify_soc
+      vars:
+        notify_subject: "Windows user disabled: {{ username }}"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"
+        notify_message: "User '{{ username }}' disabled on {{ ansible_hostname }}. All sessions terminated."

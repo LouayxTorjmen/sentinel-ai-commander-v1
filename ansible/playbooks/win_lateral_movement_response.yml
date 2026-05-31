@@ -1,0 +1,27 @@
+---
+- name: SENTINEL-AI — Lateral Movement Response (Windows)
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+  become: false
+  vars:
+    _source_ip: "{{ source_ip | default('') }}"
+    _dest_ip: "{{ dest_ip | default('') }}"
+    _incident_id: "{{ incident_id | default('unknown') }}"
+    _severity: "{{ severity | default('high') }}"
+  roles:
+    - role: win_collect_evidence
+      vars:
+        evidence_incident_id: "{{ _incident_id }}"
+        evidence_target_ip: "{{ _source_ip }}"
+    - role: win_block_ip
+      vars:
+        block_ip_address: "{{ _source_ip }}"
+        block_ip_comment: "SENTINEL-AI: Lateral movement source — incident {{ _incident_id }}"
+        block_duration_seconds: 7200
+      when: _source_ip | length > 0
+    - role: win_notify_soc
+      vars:
+        notify_subject: "Windows Lateral Movement Blocked"
+        notify_severity: "{{ _severity }}"
+        notify_incident_id: "{{ _incident_id }}"
+        notify_message: "Source IP {{ _source_ip }} blocked via Windows Firewall on {{ ansible_hostname }}"

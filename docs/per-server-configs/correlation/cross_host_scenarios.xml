@@ -1,0 +1,281 @@
+<!--
+  SENTINEL-AI Manager Rules — CROSS-HOST SCENARIO CORRELATION
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  This is the "scenario detection" layer. Per-host rules detect individual
+  events. THESE rules detect ATTACK CHAINS — sequences of events across
+  multiple hosts that together indicate a coordinated attack scenario.
+
+  Design principle: Each scenario rule chains 2-3 EARLIER rules from
+  DIFFERENT hosts. The presence of any individual rule alone is low-signal
+  noise; their co-occurrence within a timeframe is the real attack signal.
+
+  Scenarios modeled here:
+    1. Cross-DMZ recon (web + DNS + LDAP from same source within 5min)
+    2. SQLi → DB compromise (web webshell + MySQL brute force from same source)
+    3. Web compromise → lateral pivot (Apache shell + outbound to internal IP)
+    4. AD compromise → exfil (credential dump tool + outbound connection)
+    5. FTP pivot (FTP brute force success + IIS service stopped = defense evasion)
+    6. Initial Access → Persistence (any compromise rule + new service/scheduled task)
+    7. Full kill-chain (initial access + privilege escalation + lateral + exfil)
+
+  Key Wazuh syntax for cross-host correlation:
+    - <if_matched_sid>X</if_matched_sid>  — must match rule X within timeframe
+    - <same_field>srcip</same_field>      — chain requires same srcip across events
+    - <frequency>N</frequency>            — count of total matching events needed
+    - <timeframe>S</timeframe>            — seconds within which all must occur
+
+  IMPORTANT: cross-host correlation rules MUST NOT have <hostname> filter
+  on the parent rule. They span hosts by definition.
+-->
+
+<group name="sentinel,correlation,scenarios">
+
+  <!-- ─── SCENARIO 1: Coordinated DMZ Reconnaissance ──────────────────
+       An attacker doing recon will probe multiple services. We detect:
+       - DNS query (rule 100100, srv-dns-bind)
+       - Web access (rule 31100 / Apache access log, srv-web)
+       - LDAP probe (Wazuh AD rules, srv-ad-dns)
+       All from the same external source IP within 5 minutes.
+
+       Triggers Initial-Access stage detection per MITRE T1595/T1590. -->
+
+  <rule id="100300" level="13" frequency="3" timeframe="300">
+    <if_matched_sid>100100</if_matched_sid>
+    <if_matched_sid>31100</if_matched_sid>
+    <same_field>srcip</same_field>
+    <description>SCENARIO: Coordinated DMZ recon from $(srcip) — DNS + Web probes within 5min</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1590</id>
+    </mitre>
+    <group>scenario,recon,multi_host,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 2: SQLi → DB Compromise Chain ──────────────────────
+       Attacker compromises web app (DVWA), uses SQLi or shell to
+       brute-force MySQL on srv-sql. Sequence:
+       - Webshell drop on srv-web (rule 100150)
+       - OR Apache shell spawn (rule 100155)
+       - THEN MySQL brute force (rule 100182) within 10min
+
+       This catches the post-exploit DB attack chain. -->
+
+  <rule id="100301" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100155</if_matched_sid>
+    <if_matched_sid>100182</if_matched_sid>
+    <description>SCENARIO: Web compromise → DB brute force chain detected</description>
+    <mitre>
+      <id>T1505.003</id>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,attack_chain,multi_host,</group>
+  </rule>
+
+  <rule id="100302" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100150</if_matched_sid>
+    <if_matched_sid>100182</if_matched_sid>
+    <description>SCENARIO: Webshell drop → DB brute force chain detected</description>
+    <mitre>
+      <id>T1505.003</id>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,attack_chain,multi_host,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 3: Lateral Movement from Web Compromise ────────────
+       Webshell drop or apache shell → outbound network connection
+       to an INTERNAL DMZ IP within 60s. This indicates the attacker
+       has pivoted from the compromised web server to another DMZ host.
+
+       Note: outbound connections are signaled by Falco's connection
+       events. Apache shouldn't initiate outbound. -->
+
+  <rule id="100303" level="14" frequency="2" timeframe="60">
+    <if_matched_sid>100155</if_matched_sid>
+    <if_matched_sid>100110</if_matched_sid>
+    <description>SCENARIO: Web shell → lateral pivot indicator (Apache spawn + Falco net)</description>
+    <mitre>
+      <id>T1505.003</id>
+      <id>T1021</id>
+    </mitre>
+    <group>scenario,lateral_movement,multi_host,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 4: AD Compromise → Exfil ───────────────────────────
+       Credential dump tool detected on DC + outbound network connection
+       from DC within 5 minutes = stolen credentials being exfiltrated.
+
+       The 100205 rule fires on mimikatz/rubeus/kerberoast/impacket on
+       srv-ad-dns. If outbound traffic follows soon after, it's likely
+       the attacker tunneling stolen tickets/hashes out. -->
+
+  <rule id="100304" level="15" frequency="2" timeframe="300">
+    <if_matched_sid>100205</if_matched_sid>
+    <if_sid>86601</if_sid>
+    <description>SCENARIO: AD CREDENTIAL THEFT + EXFIL — dump tool used + outbound traffic</description>
+    <mitre>
+      <id>T1003</id>
+      <id>T1041</id>
+    </mitre>
+    <group>scenario,credential_access,exfiltration,multi_host,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 5: FTP Brute Force Success + Defense Evasion ───────
+       FTP brute force success → IIS service stopped within 5 minutes
+       = attacker got in via FTP credentials and is stopping logging
+       to cover tracks.
+
+       Chain: 100260 (FTP brute force success) → 100234 (IIS service stop) -->
+
+  <rule id="100305" level="15" frequency="2" timeframe="300">
+    <if_matched_sid>100260</if_matched_sid>
+    <if_matched_sid>100234</if_matched_sid>
+    <description>SCENARIO: FTP COMPROMISE + DEFENSE EVASION — brute force success + IIS stop</description>
+    <mitre>
+      <id>T1110</id>
+      <id>T1562.001</id>
+    </mitre>
+    <group>scenario,defense_evasion,multi_host,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 6: Initial Access → Persistence ────────────────────
+       Any compromise indicator on any host + new service / scheduled
+       task / account creation within 10 minutes = attacker establishing
+       persistence after initial entry.
+
+       This is a generic "post-compromise persistence" detector.
+       It fires when ANY of these initial-access rules happen first:
+       - 100150 (web webshell drop)
+       - 100231 (HTTP webshell drop on FTP)
+       - 100182 (MySQL brute force)
+       - 100200 (AD brute force)
+       - 100230 (FTP brute force)
+       AND THEN any of these persistence rules:
+       - 100204 (non-standard service install on DC)
+       - 100202 (new AD account)
+       - 100120/100121 (BIND config tampering)
+       - 100151/100152 (Apache/nginx config tampering)
+       - 100180 (MySQL config tampering)
+
+       Wazuh doesn't allow OR-of-OR in a single rule chain, so we
+       write specific common pairings. -->
+
+  <rule id="100306" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100150</if_matched_sid>
+    <if_matched_sid>100202</if_matched_sid>
+    <description>SCENARIO: Initial Access (webshell) → Persistence (new AD account)</description>
+    <mitre>
+      <id>T1505.003</id>
+      <id>T1136.002</id>
+    </mitre>
+    <group>scenario,persistence,multi_host,</group>
+  </rule>
+
+  <rule id="100307" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100182</if_matched_sid>
+    <if_matched_sid>100204</if_matched_sid>
+    <description>SCENARIO: Initial Access (DB brute force) → Persistence (rogue service)</description>
+    <mitre>
+      <id>T1110</id>
+      <id>T1543.003</id>
+    </mitre>
+    <group>scenario,persistence,multi_host,</group>
+  </rule>
+
+  <rule id="100308" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100231</if_matched_sid>
+    <if_matched_sid>100202</if_matched_sid>
+    <description>SCENARIO: Initial Access (FTP webshell) → Persistence (new AD account)</description>
+    <mitre>
+      <id>T1505.003</id>
+      <id>T1136.002</id>
+    </mitre>
+    <group>scenario,persistence,multi_host,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 7: Full Kill Chain ─────────────────────────────────
+       Three-stage detection: recon + initial access + post-exploit
+       activity all from the same source within 30 minutes.
+
+       Recon → Initial Access → ANY post-exploit fires this. -->
+
+  <rule id="100309" level="15" frequency="3" timeframe="1800">
+    <if_matched_sid>100300</if_matched_sid>
+    <if_matched_sid>100301</if_matched_sid>
+    <description>SCENARIO: FULL KILL CHAIN — recon + initial access + DB compromise</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1190</id>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,kill_chain,critical,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 8: Multi-host File Drop Pattern ─────────────────────
+       Same suspicious file path/name appears across multiple hosts.
+       Cross-host artifact spread = lateral movement via SMB / shared storage.
+
+       Wazuh's same_field works on srcip best; for filename matching
+       we'd need a CDB list (future enhancement). For now we detect
+       the simpler pattern: ANY webshell rule fires on >1 host. -->
+
+  <rule id="100310" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100150</if_matched_sid>
+    <if_matched_sid>100231</if_matched_sid>
+    <description>SCENARIO: Multi-host webshell deployment (web + FTP both targeted)</description>
+    <mitre>
+      <id>T1505.003</id>
+      <id>T1021</id>
+    </mitre>
+    <group>scenario,lateral_movement,multi_host,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 9: Recon-then-Compromise Within 10 minutes ─────────
+       This is the "automated attacker / commodity tool" signature:
+       recon (rule 100300) followed by initial access (100150, 100182,
+       100200, 100230, 100231) within 10 minutes from the same source. -->
+
+  <rule id="100311" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100300</if_matched_sid>
+    <if_matched_sid>100150</if_matched_sid>
+    <description>SCENARIO: Recon-then-exploit pattern — DMZ scan + webshell drop within 10min</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1505.003</id>
+    </mitre>
+    <group>scenario,automated_attacker,</group>
+  </rule>
+
+  <rule id="100312" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100300</if_matched_sid>
+    <if_matched_sid>100200</if_matched_sid>
+    <description>SCENARIO: Recon-then-AD brute force — DMZ scan + AD brute force within 10min</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,automated_attacker,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 10: APT-style Slow Burn ─────────────────────────────
+       Manual / APT actor signatures: same source generates events
+       across multiple hosts over LONG timeframes (e.g. 24h).
+       Lower frequency, much longer window.
+
+       This is the "low-and-slow" detector — designed to catch the
+       Apt actor mode of our orchestrator. -->
+
+  <rule id="100313" level="13" frequency="3" timeframe="86400">
+    <if_matched_sid>100100</if_matched_sid>
+    <if_matched_sid>100150</if_matched_sid>
+    <same_field>srcip</same_field>
+    <description>SCENARIO: APT-style low-and-slow — recon + exploit from same source over 24h</description>
+    <mitre>
+      <id>T1497</id>
+      <id>T1595</id>
+    </mitre>
+    <group>scenario,apt,low_and_slow,</group>
+  </rule>
+
+</group>

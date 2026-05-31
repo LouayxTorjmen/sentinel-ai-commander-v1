@@ -1,0 +1,21 @@
+---
+- name: Resolve target paths
+  ansible.builtin.set_fact:
+    paths_to_enforce: "{{ enforce_default_paths + (enforce_custom_paths | default([])) }}"
+
+- name: Reset ACL inheritance to default for each path
+  ansible.windows.win_shell: |
+    icacls "{{ item }}" /reset /T /C 2>&1
+  loop: "{{ paths_to_enforce }}"
+  when: not dry_run | bool
+  changed_when: false
+  ignore_errors: true
+
+- name: Re-deny Everyone:F on sensitive system config paths
+  ansible.windows.win_shell: |
+    icacls "{{ item }}" /deny "Everyone:(F)" 2>&1
+  loop:
+    - "C:\\Windows\\System32\\config"
+  when: not dry_run | bool
+  changed_when: false
+  ignore_errors: true

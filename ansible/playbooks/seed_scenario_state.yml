@@ -1,0 +1,329 @@
+---
+# ─────────────────────────────────────────────────────────────────────
+# SENTINEL-AI :: Attack scenario lab state seeder
+# ─────────────────────────────────────────────────────────────────────
+# Plants:
+#  1. MySQL `infra_credentials` table on srv-sql (5 real + 2 decoy)
+#  2. AS-REP-roastable AD user `svc-legacy`
+#  3. Kerberoastable AD service account `svc-mssql` (with SPN)
+#  4. lab_state.json summary at /ansible/lab_state.json
+#
+# Run via the wrapper script:
+#   ./scripts/seed_scenario.sh
+#
+# Or directly via docker exec:
+#   docker exec -it sentinel-ansible-runner \
+#     ansible-playbook \
+#     -i /ansible/inventory/scenario_hosts.yml \
+#     /ansible/playbooks/seed_scenario_state.yml
+#
+# Rollback: see rollback_scenario_state.yml
+# ─────────────────────────────────────────────────────────────────────
+
+- name: "Pre-flight :: connectivity check"
+  hosts: linux_victims:windows_victims
+  gather_facts: false
+  tasks:
+    - name: "Test connection"
+      ansible.builtin.wait_for_connection:
+        timeout: 30
+    - name: "Print reachable"
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}) reachable"
+
+# ─────────────────────────────────────────────────────────────────────
+# PHASE 1 :: Plant infra_credentials in MySQL
+# ─────────────────────────────────────────────────────────────────────
+
+- name: "Phase 1 :: plant infra_credentials table"
+  hosts: sql_host
+  gather_facts: false
+  vars:
+    mysql_root_user: root
+    mysql_root_password: louay   # CHANGE if your MySQL root password differs
+    db_name: dvwa
+    table_name: infra_credentials
+    dvwa_user: dvwa
+  tasks:
+
+    - name: "Ensure Python MySQL driver + crypto on target"
+      ansible.builtin.dnf:
+        name:
+          - python3-PyMySQL
+          - python3-cryptography
+        state: present
+
+    - name: "Create infra_credentials table (idempotent)"
+      community.mysql.mysql_query:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        login_host: 127.0.0.1
+        login_db: "{{ db_name }}"
+        query: |
+          CREATE TABLE IF NOT EXISTS {{ table_name }} (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            system_name  VARCHAR(64)  NOT NULL,
+            service      VARCHAR(32)  NOT NULL,
+            ip_address   VARCHAR(45)  NOT NULL,
+            username     VARCHAR(128) NOT NULL,
+            password     VARCHAR(256) NOT NULL,
+            notes        VARCHAR(256),
+            last_rotated DATE,
+            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+    - name: "Wipe existing rows (idempotent reseed)"
+      community.mysql.mysql_query:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        login_host: 127.0.0.1
+        login_db: "{{ db_name }}"
+        query: "DELETE FROM {{ table_name }};"
+
+    - name: "Insert REAL credentials (cred-reuse pivot chain)"
+      community.mysql.mysql_query:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        login_host: 127.0.0.1
+        login_db: "{{ db_name }}"
+        query: >
+          INSERT INTO {{ table_name }}
+          (system_name, service, ip_address, username, password, notes, last_rotated)
+          VALUES (%s, %s, %s, %s, %s, %s, %s);
+        positional_args:
+          - "{{ item.system_name }}"
+          - "{{ item.service }}"
+          - "{{ item.ip_address }}"
+          - "{{ item.username }}"
+          - "{{ item.password }}"
+          - "{{ item.notes }}"
+          - "{{ item.last_rotated }}"
+      loop:
+        - { system_name: "srv-dns-bind", service: "ssh", ip_address: "10.50.0.11", username: "louay",                  password: "Louay2002", notes: "DNS/BIND admin",         last_rotated: "2025-09-01" }
+        - { system_name: "srv-web",      service: "ssh", ip_address: "10.50.0.12", username: "louay",                  password: "Louay2002", notes: "Web server admin",       last_rotated: "2025-09-01" }
+        - { system_name: "srv-sql",      service: "ssh", ip_address: "10.50.0.13", username: "root",                   password: "louay",     notes: "DB host root",           last_rotated: "2025-08-15" }
+        - { system_name: "srv-ftp",      service: "smb", ip_address: "10.50.0.14", username: "louay-windows",          password: "Louay2002", notes: "FTP server local admin", last_rotated: "2025-09-01" }
+        - { system_name: "srv-ad-dns",   service: "ad",  ip_address: "10.50.0.10", username: "mydomain\\administrator", password: "Louay2002", notes: "Domain admin",           last_rotated: "2025-09-01" }
+
+    - name: "Insert DECOY credentials (look real, don't work)"
+      community.mysql.mysql_query:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        login_host: 127.0.0.1
+        login_db: "{{ db_name }}"
+        query: >
+          INSERT INTO {{ table_name }}
+          (system_name, service, ip_address, username, password, notes, last_rotated)
+          VALUES (%s, %s, %s, %s, %s, %s, %s);
+        positional_args:
+          - "{{ item.system_name }}"
+          - "{{ item.service }}"
+          - "{{ item.ip_address }}"
+          - "{{ item.username }}"
+          - "{{ item.password }}"
+          - "{{ item.notes }}"
+          - "{{ item.last_rotated }}"
+      loop:
+        - { system_name: "srv-backup-01",  service: "ssh",  ip_address: "10.50.0.99",  username: "backup_admin", password: "BackupP@ss2024!", notes: "DECOMMISSIONED 2025-Q1", last_rotated: "2024-06-12" }
+        - { system_name: "legacy-mail-01", service: "imap", ip_address: "10.50.0.250", username: "postmaster",   password: "MailRelay!1998",  notes: "Frozen archive only",    last_rotated: "2020-04-20" }
+
+    - name: "Grant SELECT to dvwa user (for SQLi chain to work)"
+      community.mysql.mysql_query:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        login_host: 127.0.0.1
+        login_db: "{{ db_name }}"
+        query: "GRANT SELECT ON {{ db_name }}.{{ table_name }} TO '{{ dvwa_user }}'@'%';"
+
+    - name: "Flush privileges"
+      community.mysql.mysql_query:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        login_host: 127.0.0.1
+        login_db: "{{ db_name }}"
+        query: "FLUSH PRIVILEGES;"
+
+    - name: "Read back planted rows for confirmation"
+      community.mysql.mysql_query:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        login_host: 127.0.0.1
+        login_db: "{{ db_name }}"
+        query: "SELECT id, system_name, service, ip_address, username, last_rotated FROM {{ table_name }} ORDER BY id;"
+      register: planted_creds_check
+
+    - name: "Show planted rows"
+      ansible.builtin.debug:
+        msg: "{{ planted_creds_check.query_result }}"
+
+# ─────────────────────────────────────────────────────────────────────
+# PHASE 2 :: Plant weak AD service accounts
+# ─────────────────────────────────────────────────────────────────────
+
+- name: "Phase 2 :: plant weak AD service accounts"
+  hosts: ad_hosts
+  gather_facts: false
+  vars:
+    asrep_user:
+      sam: svc-legacy
+      upn: svc-legacy@mydomain.local
+      display_name: "Legacy Service (AS-REP roastable)"
+      password: "Summer2024!"
+      description: "DO NOT MIGRATE -- legacy app integration"
+    kerberoast_user:
+      sam: svc-mssql
+      upn: svc-mssql@mydomain.local
+      display_name: "MSSQL Service Account"
+      password: "Welcome2024!"
+      description: "SQL Server service account"
+      spn: "MSSQLSvc/srv-sql.mydomain.local:1433"
+  tasks:
+
+    - name: "Confirm AD module loads"
+      ansible.windows.win_shell: |
+        Import-Module ActiveDirectory -ErrorAction Stop
+        Write-Output "AD module loaded OK"
+      register: ad_module_check
+      changed_when: false
+
+    - name: "Create AS-REP-roastable user"
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ActiveDirectory
+        $pw = ConvertTo-SecureString '{{ asrep_user.password }}' -AsPlainText -Force
+
+        $existing = Get-ADUser -Filter "SamAccountName -eq '{{ asrep_user.sam }}'" -ErrorAction SilentlyContinue
+        if ($null -eq $existing) {
+            New-ADUser `
+                -Name '{{ asrep_user.display_name }}' `
+                -SamAccountName '{{ asrep_user.sam }}' `
+                -UserPrincipalName '{{ asrep_user.upn }}' `
+                -Description '{{ asrep_user.description }}' `
+                -AccountPassword $pw `
+                -Enabled $true `
+                -PasswordNeverExpires $true `
+                -ChangePasswordAtLogon $false
+            Write-Output "CREATED: {{ asrep_user.sam }}"
+        } else {
+            Set-ADAccountPassword -Identity '{{ asrep_user.sam }}' -NewPassword $pw -Reset
+            Write-Output "UPDATED: {{ asrep_user.sam }}"
+        }
+
+        # Set DoesNotRequirePreAuth flag → AS-REP roastable
+        Set-ADAccountControl -Identity '{{ asrep_user.sam }}' -DoesNotRequirePreAuth $true
+        Write-Output "FLAG: DoesNotRequirePreAuth=true on {{ asrep_user.sam }}"
+      register: asrep_result
+
+    - name: "Show AS-REP user result"
+      ansible.builtin.debug:
+        var: asrep_result.stdout_lines
+
+    - name: "Create kerberoastable service account"
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ActiveDirectory
+        $pw = ConvertTo-SecureString '{{ kerberoast_user.password }}' -AsPlainText -Force
+
+        $existing = Get-ADUser -Filter "SamAccountName -eq '{{ kerberoast_user.sam }}'" -ErrorAction SilentlyContinue
+        if ($null -eq $existing) {
+            New-ADUser `
+                -Name '{{ kerberoast_user.display_name }}' `
+                -SamAccountName '{{ kerberoast_user.sam }}' `
+                -UserPrincipalName '{{ kerberoast_user.upn }}' `
+                -Description '{{ kerberoast_user.description }}' `
+                -AccountPassword $pw `
+                -Enabled $true `
+                -PasswordNeverExpires $true `
+                -ChangePasswordAtLogon $false
+            Write-Output "CREATED: {{ kerberoast_user.sam }}"
+        } else {
+            Set-ADAccountPassword -Identity '{{ kerberoast_user.sam }}' -NewPassword $pw -Reset
+            Write-Output "UPDATED: {{ kerberoast_user.sam }}"
+        }
+
+        # Register SPN → kerberoastable
+        $current_spns = (Get-ADUser -Identity '{{ kerberoast_user.sam }}' -Properties servicePrincipalName).servicePrincipalName
+        if ($current_spns -notcontains '{{ kerberoast_user.spn }}') {
+            Set-ADUser -Identity '{{ kerberoast_user.sam }}' -ServicePrincipalNames @{Add='{{ kerberoast_user.spn }}'}
+            Write-Output "SPN ADDED: {{ kerberoast_user.spn }}"
+        } else {
+            Write-Output "SPN ALREADY PRESENT: {{ kerberoast_user.spn }}"
+        }
+      register: kerberoast_result
+
+    - name: "Show kerberoast user result"
+      ansible.builtin.debug:
+        var: kerberoast_result.stdout_lines
+
+    - name: "Verify planted AD accounts"
+      ansible.windows.win_shell: |
+        Import-Module ActiveDirectory
+        Get-ADUser -Filter "SamAccountName -like 'svc-*'" `
+            -Properties SamAccountName, UserPrincipalName, Enabled, DoesNotRequirePreAuth, servicePrincipalName, Description `
+            | Select-Object SamAccountName, UserPrincipalName, Enabled, DoesNotRequirePreAuth, @{N='SPN';E={$_.servicePrincipalName -join ','}}, Description `
+            | ConvertTo-Json
+      register: ad_readback
+      changed_when: false
+
+    - name: "Show AD readback"
+      ansible.builtin.debug:
+        msg: "{{ ad_readback.stdout }}"
+
+# ─────────────────────────────────────────────────────────────────────
+# PHASE 3 :: Write lab_state.json summary
+# ─────────────────────────────────────────────────────────────────────
+
+- name: "Phase 3 :: write lab_state.json"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    state_file: /ansible/lab_state.json
+  tasks:
+
+    - name: "Compose lab state"
+      ansible.builtin.set_fact:
+        lab_state:
+          generated_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+          scenario_seeded: true
+          mysql_planted:
+            host: "10.50.0.13"
+            database: "dvwa"
+            table: "infra_credentials"
+            real_creds_count: 5
+            decoy_creds_count: 2
+            dvwa_user_can_select: true
+            sqli_dump_payload: "1' UNION SELECT username,password FROM infra_credentials-- -"
+          ad_planted:
+            domain: "mydomain.local"
+            dc: "10.50.0.10"
+            accounts:
+              - sam: "svc-legacy"
+                upn: "svc-legacy@mydomain.local"
+                weakness: "AS-REP roastable (DoesNotRequirePreAuth=true)"
+                password: "Summer2024!"
+                attack_tool_hint: "impacket-GetNPUsers mydomain.local/ -no-pass -usersfile users.txt"
+              - sam: "svc-mssql"
+                upn: "svc-mssql@mydomain.local"
+                weakness: "Kerberoastable (SPN registered)"
+                password: "Welcome2024!"
+                spn: "MSSQLSvc/srv-sql.mydomain.local:1433"
+                attack_tool_hint: "impacket-GetUserSPNs mydomain.local/<user>:<pass> -request"
+          targets:
+            - { name: srv-ad-dns,   ip: "10.50.0.10", role: "AD DC + DNS",     services: [53, 88, 135, 389, 445, 464, 636, 3268, 3269, 5985] }
+            - { name: srv-dns-bind, ip: "10.50.0.11", role: "Unix DNS (BIND)", services: [22, 53] }
+            - { name: srv-web,      ip: "10.50.0.12", role: "Web (DVWA)",      services: [22, 80] }
+            - { name: srv-sql,      ip: "10.50.0.13", role: "MySQL backend",   services: [22, 3306] }
+            - { name: srv-ftp,      ip: "10.50.0.14", role: "IIS FTP",         services: [21, 5985] }
+
+    - name: "Write lab_state.json"
+      ansible.builtin.copy:
+        content: "{{ lab_state | to_nice_json(indent=2) }}"
+        dest: "{{ state_file }}"
+        mode: "0600"
+
+    - name: "Confirm location"
+      ansible.builtin.debug:
+        msg:
+          - "Lab state written to {{ state_file }} (inside container)"
+          - "On host: ~/sentinel-ai-commander/ansible/lab_state.json"

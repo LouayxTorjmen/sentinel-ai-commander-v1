@@ -1,0 +1,54 @@
+---
+- name: Validate restore_file_path
+  ansible.builtin.fail:
+    msg: "restore_file_path is required"
+  when: restore_file_path == ""
+
+# Strategy 1: a hand-managed baseline copy under restore_baseline_dir
+# Strategy 2 (fallback): Volume Shadow Copy via vssadmin
+
+- name: Compute baseline candidate path
+  ansible.builtin.set_fact:
+    baseline_candidate: "{{ restore_baseline_dir }}\\{{ restore_file_path | regex_replace('^[A-Za-z]:[\\\\/]+', '') }}"
+
+- name: Check if baseline file exists
+  ansible.windows.win_stat:
+    path: "{{ baseline_candidate }}"
+  register: baseline_stat
+
+- name: Restore from baseline directory if present
+  ansible.windows.win_copy:
+    src: "{{ baseline_candidate }}"
+    dest: "{{ restore_file_path }}"
+    remote_src: yes
+  when:
+    - not dry_run | bool
+    - baseline_stat.stat.exists
+
+- name: Fall back to VSS shadow copy if no baseline file
+  ansible.windows.win_shell: |
+    $shadows = vssadmin list shadows /for=C: 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      Write-Output "NO_VSS"
+      exit 0
+    }
+    # Pick the most recent shadow copy
+    $latest = ($shadows | Select-String 'Shadow Copy Volume:' | Select-Object -Last 1).Line -replace '.*:\s*',''
+    if (-not $latest) { Write-Output "NO_VSS"; exit 0 }
+    $relPath = "{{ restore_file_path }}" -replace '^[A-Za-z]:[\\/]', ''
+    $shadowSrc = "$latest\$relPath"
+    Copy-Item -LiteralPath $shadowSrc -Destination "{{ restore_file_path }}" -Force
+    Write-Output "RESTORED_FROM_VSS"
+  register: vss_result
+  when:
+    - not dry_run | bool
+    - not baseline_stat.stat.exists
+  changed_when: "'RESTORED_FROM_VSS' in vss_result.stdout | default('')"
+  ignore_errors: true
+
+- name: Log restore action
+  community.windows.win_lineinfile:
+    path: C:\SentinelEvidence\restores.log
+    line: "{{ ansible_date_time.iso8601 | default('') }} | path={{ restore_file_path }} | baseline_exists={{ baseline_stat.stat.exists }} | vss_result={{ vss_result.stdout | default('n/a') | trim }}"
+    create: yes
+  ignore_errors: true

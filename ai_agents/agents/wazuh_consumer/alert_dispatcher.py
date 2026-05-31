@@ -41,6 +41,11 @@ HARD_SKIP_RULES = {
     40704,   # systemd unit failure (desktop app crashes)
     2902,    # dpkg package installed (workstation noise)
     2904,    # dpkg package removed (workstation noise)
+    # SENTINEL-AI feedback rules — would create dispatch loop
+    100500, 100501, 100502, 100503, 100504, 100505, 100506, 100507,
+    # Windows NTLM logon — too noisy (Ansible WinRM generates constantly)
+    # Lateral movement detected via custom rule 100620 instead
+    92657,
 }
 
 # FIM rules that need path-based filtering (real changes still pass)
@@ -63,6 +68,14 @@ _FIM_NOISE_PATTERNS = (
     "/var/lib/dnf/", "/var/lib/apt/", "/var/lib/rpm/",
     # systemd transient drop-ins
     "/run/systemd/",
+    # Windows: C# compiler (csc.exe) temp artifacts spawned by Ansible/WinRM
+    # itself under AppData\Local\Temp — prevents a FIM self-noise feedback loop
+    # (win playbook runs -> csc.exe writes temp -> FIM fires -> playbook runs...)
+    "\\appdata\\local\\temp\\",
+    ".cmdline",
+    "/var/log/nginx/",
+    "/var/www/sentinel",
+    "/etc/nginx/",
 )
 
 # Tracks (rule_id, agent_name) -> last dispatch timestamp (monotonic)
@@ -168,7 +181,7 @@ async def dispatch_alerts(orchestrator) -> None:
                 level = int(level)
             except (TypeError, ValueError):
                 level = 0
-            if level < DISPATCH_MIN_LEVEL:
+            if level < DISPATCH_MIN_LEVEL and rule_id not in STATIC_RULE_MAP:
                 logger.debug("alert_dispatcher.skip_low_level",
                              level=level, min_level=DISPATCH_MIN_LEVEL)
                 continue

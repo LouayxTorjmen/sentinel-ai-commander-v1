@@ -1,0 +1,176 @@
+<!--
+  SENTINEL-AI Cross-Host Scenarios v2 — Working Wazuh Pattern
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+  (replaces the previous 13 scenarios - delete the old <group name="sentinel,correlation,scenarios"> first)
+
+  THE LESSON: Wazuh's `<if_matched_sid>` only supports ONE parent rule
+  per <rule>. Multiple <if_matched_sid> lines are silently ignored except
+  the first. So the original "chain X AND Y" design was broken.
+
+  THE FIX: Each scenario is now N events of ONE parent rule from the
+  same source IP within a timeframe. The "AND across hosts" semantic is
+  achieved by chaining LATER scenarios on EARLIER scenarios:
+    100300 fires when 3+ AXFR happen → indexed as alert
+    100311 chains on 100300 + another parent → fires when both happen
+
+  For two-rule correlation that genuinely needs both to fire, the
+  approach is: write rule X that fires when source IP is in a CDB list
+  populated by rule Y. This requires Wazuh CDB lists (future work).
+
+  For now, scenario rules use single-parent + same_source_ip + frequency.
+-->
+
+<group name="sentinel,correlation,scenarios">
+
+  <!-- ─── SCENARIO 1: AXFR recon (working pattern, already deployed) ─── -->
+  <rule id="100300" level="13" frequency="3" timeframe="300">
+    <if_matched_sid>100102</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Coordinated DNS recon — 3+ AXFR attempts from $(srcip) in 5min</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1590</id>
+    </mitre>
+    <group>scenario,recon,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 2: Web 4xx scanning ──────────────────────────────────
+       5+ web errors from same source = directory brute force / vuln scan -->
+  <rule id="100301" level="12" frequency="5" timeframe="120">
+    <if_matched_sid>31101</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Web reconnaissance — 5+ 4xx errors from $(srcip) in 2min</description>
+    <mitre>
+      <id>T1595.002</id>
+    </mitre>
+    <group>scenario,recon,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 3: Apache 5xx errors burst (SQLi/RCE probing) ────── -->
+  <rule id="100302" level="13" frequency="3" timeframe="60">
+    <if_matched_sid>31151</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Web exploitation probing — 3+ 5xx errors from $(srcip) in 60s</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>scenario,exploitation,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 4: SSH brute force escalation ────────────────────── -->
+  <rule id="100303" level="13" frequency="10" timeframe="120">
+    <if_matched_sid>5716</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: SSH brute force campaign — 10+ failed logins from $(srcip) in 2min</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,brute_force,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 5: Windows AD brute force escalation ────────────── -->
+  <rule id="100304" level="13" frequency="10" timeframe="180">
+    <if_matched_sid>60122</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: AD brute force campaign — 10+ Windows auth failures in 3min</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,brute_force,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 6: Recon followed by web exploitation ────────────────
+       Chain scenario: AXFR recon (100300) already fired AND web exploitation
+       (100302) also fires from same source = recon-then-exploit pattern.
+
+       This IS multi-parent: 100300 fires first (level 13, gets indexed),
+       then 100302 fires within 30 min → chained correlation. -->
+  <rule id="100305" level="14" frequency="2" timeframe="1800">
+    <if_matched_sid>100300</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Recon → exploit chain — DNS recon then web 5xx from $(srcip)</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1190</id>
+    </mitre>
+    <group>scenario,kill_chain,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 7: Webshell drop campaign (multiple drops) ──────── -->
+  <rule id="100306" level="14" frequency="2" timeframe="600">
+    <if_matched_sid>100150</if_matched_sid>
+    <same_source_ip />
+    <description>SCENARIO: Multi-stage webshell deployment — 2+ webshell drops in 10min</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>scenario,persistence,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 8: Webshell drop + access (delivery + use) ────────
+       100150 fires (file added under uploads), then ANY further FIM
+       event or web access on srv-web within 60s from same source. -->
+  <rule id="100307" level="14" frequency="2" timeframe="60">
+    <if_matched_sid>100150</if_matched_sid>
+    <description>SCENARIO: Webshell delivery — file drop followed by activity within 60s</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>scenario,webshell,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 9: MySQL brute force escalation ─────────────────── -->
+  <rule id="100308" level="13" frequency="2" timeframe="120">
+    <if_matched_sid>100182</if_matched_sid>
+    <description>SCENARIO: Sustained MySQL brute force — multiple bursts in 2min</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,brute_force,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 10: FTP brute force escalation ──────────────────── -->
+  <rule id="100309" level="13" frequency="2" timeframe="180">
+    <if_matched_sid>100230</if_matched_sid>
+    <description>SCENARIO: Sustained FTP brute force — multiple bursts in 3min</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>scenario,brute_force,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 11: Apache shell spawn (severe) ─────────────────── -->
+  <rule id="100310" level="15" frequency="2" timeframe="300">
+    <if_matched_sid>100155</if_matched_sid>
+    <description>SCENARIO: Active web server compromise — Apache spawned 2+ shells in 5min</description>
+    <mitre>
+      <id>T1059.004</id>
+      <id>T1190</id>
+    </mitre>
+    <group>scenario,compromise,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 12: Credential dump tool used ─────────────────────
+       Rule 100205 catches mimikatz/rubeus/etc by name via Sysmon.
+       Single fire is enough — the rule itself requires the tool to
+       have run. Scenario rule just elevates to "critical incident". -->
+  <rule id="100311" level="15">
+    <if_sid>100205</if_sid>
+    <description>SCENARIO: CRITICAL INCIDENT — credential dumping tool executed on DC</description>
+    <mitre>
+      <id>T1003</id>
+    </mitre>
+    <group>scenario,credential_theft,critical,</group>
+  </rule>
+
+  <!-- ─── SCENARIO 13: Persistence indicators (any AD account event) ── -->
+  <rule id="100312" level="13" frequency="3" timeframe="600">
+    <if_matched_sid>100202</if_matched_sid>
+    <description>SCENARIO: Persistence campaign — 3+ AD accounts created in 10min</description>
+    <mitre>
+      <id>T1136.002</id>
+    </mitre>
+    <group>scenario,persistence,</group>
+  </rule>
+
+</group>

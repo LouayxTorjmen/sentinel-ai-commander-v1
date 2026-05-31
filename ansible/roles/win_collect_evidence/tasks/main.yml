@@ -1,0 +1,77 @@
+---
+# Collect forensic evidence on a Windows host before remediation.
+- name: Ensure evidence directory exists
+  ansible.windows.win_file:
+    path: "{{ evidence_dir }}\\{{ evidence_incident_id }}"
+    state: directory
+
+- name: Snapshot running processes
+  ansible.windows.win_shell: |
+    $procs = @(Get-Process | Select-Object Id, ProcessName, Path, StartTime, CPU, WorkingSet)
+    if ($procs.Count -eq 0) {
+      "[]" | Out-File -Encoding utf8 "{{ evidence_dir }}\{{ evidence_incident_id }}\processes.json"
+    } else {
+      ($procs | ConvertTo-Json -Depth 3) | Out-File -Encoding utf8 "{{ evidence_dir }}\{{ evidence_incident_id }}\processes.json"
+    }
+  when: collect_processes | bool
+  changed_when: false
+
+- name: Snapshot network connections
+  ansible.windows.win_shell: |
+    $conns = @(Get-NetTCPConnection -ErrorAction SilentlyContinue |
+               Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort,
+                 @{N='State';E={[string]$_.State}}, OwningProcess,
+                 @{N='ProcessName';E={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name}})
+    if ($conns.Count -eq 0) {
+      "[]" | Out-File -Encoding utf8 "{{ evidence_dir }}\{{ evidence_incident_id }}\network.json"
+    } else {
+      ($conns | ConvertTo-Json -Depth 3) | Out-File -Encoding utf8 "{{ evidence_dir }}\{{ evidence_incident_id }}\network.json"
+    }
+  when: collect_network | bool
+  changed_when: false
+
+- name: Export recent Security event log (last hour)
+  ansible.windows.win_shell: |
+    wevtutil epl Security "{{ evidence_dir }}\{{ evidence_incident_id }}\security.evtx" /q:"*[System[TimeCreated[timediff(@SystemTime) <= 3600000]]]" /ow:true
+  when: collect_event_log | bool
+  changed_when: false
+  ignore_errors: true
+
+- name: Export recent System event log
+  ansible.windows.win_shell: |
+    wevtutil epl System "{{ evidence_dir }}\{{ evidence_incident_id }}\system.evtx" /q:"*[System[TimeCreated[timediff(@SystemTime) <= 3600000]]]" /ow:true
+  when: collect_event_log | bool
+  changed_when: false
+  ignore_errors: true
+
+- name: Initialize notes file
+  ansible.windows.win_copy:
+    dest: "{{ evidence_dir }}\\{{ evidence_incident_id }}\\notes.txt"
+    content: |
+      Incident notes for {{ evidence_incident_id }}
+      Started: {{ ansible_date_time.iso8601 | default('n/a') }}
+
+- name: Capture memory dump (if requested)
+  ansible.windows.win_shell: |
+    if (Get-Command procdump.exe -ErrorAction SilentlyContinue) {
+      procdump.exe -ma -accepteula -o "{{ evidence_dir }}\{{ evidence_incident_id }}\mem.dmp" 2>&1
+      "Memory dump captured via procdump." | Out-File -Append "{{ evidence_dir }}\{{ evidence_incident_id }}\notes.txt"
+    } else {
+      "procdump.exe not available; memory dump skipped." | Out-File -Append "{{ evidence_dir }}\{{ evidence_incident_id }}\notes.txt"
+    }
+  when: collect_memory | bool
+  changed_when: false
+  ignore_errors: true
+
+- name: Write evidence manifest
+  ansible.windows.win_copy:
+    dest: "{{ evidence_dir }}\\{{ evidence_incident_id }}\\manifest.txt"
+    content: |
+      Incident   : {{ evidence_incident_id }}
+      Host       : {{ ansible_hostname }}
+      Target IP  : {{ evidence_target_ip }}
+      Collected  : {{ ansible_date_time.iso8601 | default('') }}
+      Processes  : {{ collect_processes }}
+      Network    : {{ collect_network }}
+      EventLog   : {{ collect_event_log }}
+      Memory     : {{ collect_memory }}

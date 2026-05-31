@@ -1,6 +1,30 @@
-ansible>=9.0.0
+# ─── Ansible runner container Python deps ─────────────────────────────
+# These get installed at docker build time. After editing, rebuild with:
+#   docker compose build ansible-runner
+#   docker compose up -d ansible-runner
+
+# Core ansible toolchain
+ansible>=9.0.0,<10.0.0
 ansible-runner>=2.3.0
+
+# HTTP API wrapper
 flask>=3.0.0
 flask-cors>=4.0.0
+
+# Config / logging
 python-dotenv>=1.0.0
 structlog>=24.1.0
+
+# ─── NEW: scenario playbook deps ──────────────────────────────────────
+# WinRM transport for Windows hosts (srv-ad-dns, srv-ftp)
+pywinrm>=0.5.0
+
+# MySQL driver for community.mysql modules (mysql_query, mysql_user, etc.)
+PyMySQL>=1.1.0
+
+# JSON path queries used by ansible playbooks (jmespath_query filter, json_query, etc.)
+jmespath>=1.0.1
+
+# pywinrm pulls these but pin explicitly so they don't drift
+requests-ntlm>=1.3.0
+pyspnego>=0.10.0

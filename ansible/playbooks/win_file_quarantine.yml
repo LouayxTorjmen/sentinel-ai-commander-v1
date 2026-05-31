@@ -1,0 +1,28 @@
+---
+- name: SENTINEL-AI — File Quarantine Response (Windows)
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+  become: false
+
+  pre_tasks:
+    - name: Require file_path
+      ansible.builtin.fail:
+        msg: "file_path is required for quarantine"
+      when: file_path == ""
+
+  roles:
+    - role: win_collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+
+    - role: win_quarantine_file
+      vars:
+        quarantine_file_path: "{{ file_path }}"
+        quarantine_reason: "Incident {{ incident_id }} ({{ severity }})"
+
+    - role: win_notify_soc
+      vars:
+        notify_subject: "Windows file quarantined: {{ file_path }}"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"
+        notify_message: "File moved to C:\\Quarantine\\ on {{ ansible_hostname }}"

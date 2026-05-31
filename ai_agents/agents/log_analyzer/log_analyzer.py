@@ -8,13 +8,8 @@ from ai_agents.config import get_settings
 logger = structlog.get_logger()
 
 def _build_lm():
-    s = get_settings()
-    return dspy.LM(
-        model=f"groq/{s.llm_model}",
-        api_key=s.groq_api_key,
-        temperature=s.llm_temperature,
-        max_tokens=s.llm_max_tokens,
-    )
+    from ai_agents.llm.fallback import get_lm
+    return get_lm(preferred="cerebras")
 
 class LogAnalyzerAgent(BaseAgent):
     name = "log_analyzer"

@@ -1,0 +1,6 @@
+attacker_ip: ""
+dns_exfil_incident_id: "unknown"
+dns_exfil_comment: "SENTINEL-AI: DoH exfiltration block"
+dnsdist_config_path: /etc/dnsdist/dnsdist.conf
+dnsdist_block_marker: "-- SENTINEL-AI dynamic block list — managed by Ansible, do not edit by hand"
+dry_run: false

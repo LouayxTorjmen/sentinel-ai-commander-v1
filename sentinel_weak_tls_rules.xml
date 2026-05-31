@@ -1,0 +1,123 @@
+<!--
+  ============================================================================
+  SENTINEL-AI — Wazuh Detection Rules: Weak TLS to srv-web
+  File:    /var/ossec/etc/rules/sentinel_weak_tls.xml
+  ============================================================================
+
+  DETECTION LOGIC:
+    Suricata on pfSense (agent 091, sentinel-fw.sentinel.lab) emits
+    event_type=tls events via eve.json. Wazuh decodes them under data.*
+    The tls.version field contains the negotiated protocol string:
+      "TLS 1.0"  — deprecated, RFC 8996
+      "TLS 1.1"  — deprecated, RFC 8996
+      "TLS 1.2"  — acceptable but watch for weak ciphers
+      "TLS 1.3"  — current standard
+
+  RULE CHAIN:
+    100200  Base: Suricata TLS event inbound to srv-web (10.50.0.12:443)
+    100201  ALERT: TLS 1.0 negotiated         — HIGH
+    100202  ALERT: TLS 1.1 negotiated         — HIGH
+    100203  WARN : TLS 1.2 without PFS cipher — MEDIUM (future expansion)
+    100210  CRITICAL: repeated weak TLS       — frequency composite
+
+  RESPONSE TRIGGER:
+    Rules 100201 / 100202 fire the active-response that calls
+    ansible-playbook harden_nginx_tls.yml on Ubuntu-agent-web.
+  ============================================================================
+-->
+
+<group name="sentinel,tls,suricata,network">
+
+  <!-- ========================================================================
+       BASE RULE — Suricata TLS event destined for srv-web port 443
+       Matches any TLS handshake Suricata logged to/from 10.50.0.12:443.
+       Not an alert on its own (noalert); child rules carry the severity.
+       ======================================================================== -->
+  <rule id="100200" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="data.event_type">^tls$</field>
+    <field name="data.dest_ip">^10\.50\.0\.12$</field>
+    <field name="data.dest_port">^443$</field>
+    <description>Suricata: TLS handshake observed to srv-web (10.50.0.12:443)</description>
+    <options>no_log</options>
+    <group>tls_baseline,suricata_tls</group>
+  </rule>
+
+  <!-- ========================================================================
+       ALERT — TLS 1.0 negotiated to srv-web
+       tls.version = "TLS 1.0" exactly as Suricata emits it.
+       RFC 8996 deprecated TLS 1.0 in March 2021.
+       ======================================================================== -->
+  <rule id="100201" level="12">
+    <if_sid>100200</if_sid>
+    <field name="data.tls.version">^TLS 1\.0$</field>
+    <description>Weak TLS: TLS 1.0 negotiated to srv-web ($(data.src_ip):$(data.src_port) -> 10.50.0.12:443) — deprecated per RFC 8996</description>
+    <mitre>
+      <id>T1040</id>
+      <id>T1190</id>
+    </mitre>
+    <group>tls_weak,tls_1_0,pci_dss_4.2.1,sentinel_response_required</group>
+  </rule>
+
+  <!-- ========================================================================
+       ALERT — TLS 1.1 negotiated to srv-web
+       tls.version = "TLS 1.1" exactly as Suricata emits it.
+       RFC 8996 deprecated TLS 1.1 in March 2021.
+       ======================================================================== -->
+  <rule id="100202" level="12">
+    <if_sid>100200</if_sid>
+    <field name="data.tls.version">^TLS 1\.1$</field>
+    <description>Weak TLS: TLS 1.1 negotiated to srv-web ($(data.src_ip):$(data.src_port) -> 10.50.0.12:443) — deprecated per RFC 8996</description>
+    <mitre>
+      <id>T1040</id>
+      <id>T1190</id>
+    </mitre>
+    <group>tls_weak,tls_1_1,pci_dss_4.2.1,sentinel_response_required</group>
+  </rule>
+
+  <!-- ========================================================================
+       WARN — TLS 1.2 with no forward secrecy (future expansion hook)
+       Placeholder: fires when tls.version=TLS 1.2 AND no ECDHE/DHE in
+       data.tls.cipher (when Suricata logs the cipher — not all builds do).
+       Level 7 = medium, informational only for now.
+       ======================================================================== -->
+  <rule id="100203" level="7">
+    <if_sid>100200</if_sid>
+    <field name="data.tls.version">^TLS 1\.2$</field>
+    <field name="data.tls.cipher">TLS_RSA_</field>
+    <description>TLS 1.2 without forward secrecy cipher to srv-web ($(data.src_ip) -> 10.50.0.12) — RSA key exchange has no PFS</description>
+    <mitre>
+      <id>T1040</id>
+    </mitre>
+    <group>tls_no_pfs,pci_dss_4.2.1</group>
+  </rule>
+
+  <!-- ========================================================================
+       FREQUENCY COMPOSITE — Repeated weak TLS in 60s window
+       Fires when 5+ weak TLS events (100201 OR 100202) hit within 60 seconds.
+       Indicates a scanner (sslyze, testssl) or systematic misconfiguration,
+       not just an isolated legacy client.
+       ======================================================================== -->
+  <rule id="100210" level="15" frequency="5" timeframe="60">
+    <if_matched_sid>100201</if_matched_sid>
+    <same_field>data.dest_ip</same_field>
+    <description>SENTINEL: Repeated weak TLS 1.0 connections to srv-web — possible TLS downgrade scan or persistent misconfiguration</description>
+    <mitre>
+      <id>T1040</id>
+      <id>T1595.002</id>
+    </mitre>
+    <group>tls_scan,sentinel_response_required,high_frequency</group>
+  </rule>
+
+  <rule id="100211" level="15" frequency="5" timeframe="60">
+    <if_matched_sid>100202</if_matched_sid>
+    <same_field>data.dest_ip</same_field>
+    <description>SENTINEL: Repeated weak TLS 1.1 connections to srv-web — possible TLS downgrade scan or persistent misconfiguration</description>
+    <mitre>
+      <id>T1040</id>
+      <id>T1595.002</id>
+    </mitre>
+    <group>tls_scan,sentinel_response_required,high_frequency</group>
+  </rule>
+
+</group>

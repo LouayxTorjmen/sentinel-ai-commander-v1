@@ -5,9 +5,13 @@ from functools import lru_cache
 class Settings(BaseSettings):
     log_level: str = Field("INFO", env="LOG_LEVEL")
 
-    # Groq LLM (primary)
+    # Groq LLM
     groq_api_key: str = Field("", env="GROQ_API_KEY")
     llm_model: str = Field("llama-3.3-70b-versatile", env="LLM_MODEL")
+    # Cerebras LLM (primary when available)
+    cerebras_api_key: str = Field("", env="CEREBRAS_API_KEY")
+    cerebras_model: str = Field("gpt-oss-120b", env="CEREBRAS_MODEL")
+    litellm_primary_provider: str = Field("groq", env="LITELLM_PRIMARY_PROVIDER")
     llm_temperature: float = Field(0, env="LLM_TEMPERATURE")
     llm_max_tokens: int = Field(4096, env="LLM_MAX_TOKENS")
 

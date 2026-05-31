@@ -1,0 +1,42 @@
+---
+- name: Validate IP provided
+  ansible.builtin.fail:
+    msg: "block_ip_address is required"
+  when: block_ip_address == ""
+
+- name: Block IP in Windows Firewall (inbound)
+  ansible.windows.win_shell: |
+    $ruleName = "{{ block_rule_prefix }}-{{ block_ip_address }}-in"
+    Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $ruleName `
+      -Direction Inbound `
+      -Action Block `
+      -RemoteAddress "{{ block_ip_address }}" `
+      -Description "{{ block_ip_comment }}" `
+      -Enabled True
+  when: not dry_run | bool
+  changed_when: true
+
+- name: Block IP in Windows Firewall (outbound)
+  ansible.windows.win_shell: |
+    $ruleName = "{{ block_rule_prefix }}-{{ block_ip_address }}-out"
+    Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $ruleName `
+      -Direction Outbound `
+      -Action Block `
+      -RemoteAddress "{{ block_ip_address }}" `
+      -Description "{{ block_ip_comment }}" `
+      -Enabled True
+  when: not dry_run | bool
+  changed_when: true
+
+- name: Schedule unblock task (Windows scheduled task)
+  ansible.windows.win_shell: |
+    $taskName = "SentinelAI-Unblock-{{ block_ip_address }}"
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -Command `"Remove-NetFirewallRule -DisplayName '{{ block_rule_prefix }}-{{ block_ip_address }}-in','{{ block_rule_prefix }}-{{ block_ip_address }}-out' -ErrorAction SilentlyContinue`""
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds({{ block_duration_seconds }})
+    $settings = New-ScheduledTaskSettingsSet -DeleteExpiredTaskAfter (New-TimeSpan -Minutes 5)
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -User "SYSTEM" -Force
+  when: not dry_run | bool
+  changed_when: false
+  ignore_errors: true

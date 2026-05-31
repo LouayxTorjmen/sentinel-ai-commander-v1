@@ -1,0 +1,294 @@
+---
+# =============================================================================
+#  SENTINEL-AI — Scenario Setup: nginx Weak TLS (vulnerable baseline) v5
+#
+#  ROOT CAUSE (final):
+#    nginx (built with OpenSSL 3.0) initialises its SSL context during
+#    master process startup via SSL_CTX_new() which reads OPENSSL_CONF
+#    only if it is set BEFORE the OpenSSL library is loaded — i.e. before
+#    the nginx binary starts. The systemd Environment= directive sets it
+#    in the process environment, but nginx's OpenSSL init fires in the
+#    static constructor phase before main() reads env vars in some builds.
+#
+#    Confirmed: manual `OPENSSL_CONF=... openssl s_client -tls1` connected
+#    successfully, proving our openssl.cnf syntax is correct and TLS 1.0
+#    works at the OpenSSL layer. The problem is server-side only.
+#
+#    SOLUTION: patch /etc/ssl/openssl.cnf directly on the agent.
+#    The system openssl.cnf has NO ssl_conf / MinProtocol section at all
+#    (confirmed by inspection) — we append one. This is:
+#      - Scoped to Ubuntu-agent-web only (lab VM, not production)
+#      - Fully reversible: harden_nginx_tls removes the appended block
+#      - The backup /etc/ssl/openssl.cnf.sentinel-backup allows exact restore
+# =============================================================================
+- name: "SENTINEL-AI — Scenario Setup: nginx Weak TLS baseline v5"
+  hosts: "{{ target_hosts | default('Ubuntu-agent-web') }}"
+  gather_facts: yes
+  become: true
+
+  vars:
+    web_root:       /var/www/sentinel-weak-tls
+    cert_dir:       /etc/nginx/sentinel-tls
+    cert_cn:        "srv-web.mydomain.com"
+    vhost_path:     /etc/nginx/sites-available/sentinel-weak-tls.conf
+    vhost_link:     /etc/nginx/sites-enabled/sentinel-weak-tls.conf
+    system_ssl_cnf: /etc/ssl/openssl.cnf
+    backup_ssl_cnf: /etc/ssl/openssl.cnf.sentinel-backup
+    sentinel_block: "# SENTINEL-AI-WEAK-TLS-BEGIN"
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # Prerequisites
+    # -------------------------------------------------------------------------
+    - name: Stop and disable apache2
+      ansible.builtin.service:
+        name: apache2
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Install nginx + openssl
+      ansible.builtin.apt:
+        name: [nginx, openssl]
+        state: present
+        update_cache: yes
+
+    - name: Remove default nginx vhost
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    # -------------------------------------------------------------------------
+    # Remove any leftover OPENSSL_CONF drop-in from v3/v4 (clean slate)
+    # -------------------------------------------------------------------------
+    - name: Remove systemd drop-in from previous attempts
+      ansible.builtin.file:
+        path: /etc/systemd/system/nginx.service.d/sentinel-openssl.conf
+        state: absent
+      notify: reload systemd
+
+    # -------------------------------------------------------------------------
+    # Patch system openssl.cnf to lower TLS floor for ALL processes on host.
+    # Safe on a lab VM. Backup taken first; harden playbook restores backup.
+    #
+    # The system openssl.cnf has no ssl_conf section — we append one that:
+    #   MinProtocol = None   → no minimum version floor
+    #   CipherString = DEFAULT:@SECLEVEL=0  → allow legacy ciphers incl 3DES
+    # -------------------------------------------------------------------------
+    - name: Check if sentinel block already present in openssl.cnf
+      ansible.builtin.shell: >
+        grep -c '{{ sentinel_block }}' {{ system_ssl_cnf }} || true
+      register: block_present
+      changed_when: false
+
+    - name: Backup system openssl.cnf (once — skip if backup exists)
+      ansible.builtin.copy:
+        src: "{{ system_ssl_cnf }}"
+        dest: "{{ backup_ssl_cnf }}"
+        remote_src: yes
+        force: no
+
+    - name: Patch openssl.cnf — wire ssl_conf into [openssl_init]
+      ansible.builtin.lineinfile:
+        path: "{{ system_ssl_cnf }}"
+        regexp: '^openssl_conf\s*='
+        line: 'openssl_conf = openssl_init'
+        backrefs: no
+      when: block_present.stdout == "0"
+
+    - name: Patch openssl.cnf — add ssl_conf to [openssl_init] section
+      ansible.builtin.blockinfile:
+        path: "{{ system_ssl_cnf }}"
+        marker: "# SENTINEL-AI-WEAK-TLS-{mark}"
+        insertafter: '^\[openssl_init\]'
+        block: |
+          ssl_conf = ssl_sect
+      when: block_present.stdout == "0"
+
+    - name: Append weak TLS ssl sections to openssl.cnf
+      ansible.builtin.blockinfile:
+        path: "{{ system_ssl_cnf }}"
+        marker: "# SENTINEL-AI-WEAK-TLS-SECTIONS-{mark}"
+        insertbefore: EOF
+        block: |
+
+          [ssl_sect]
+          system_default = system_default_sect
+
+          [system_default_sect]
+          MinProtocol = None
+          CipherString = DEFAULT:@SECLEVEL=0
+      when: block_present.stdout == "0"
+
+    # -------------------------------------------------------------------------
+    # Web content
+    # -------------------------------------------------------------------------
+    - name: Create web root
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Landing page
+      ansible.builtin.copy:
+        dest: "{{ web_root }}/index.html"
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html><head><title>srv-web</title></head>
+          <body><h1>SENTINEL-AI lab web server</h1>
+          <p>Phase 2 weak-TLS scenario target.</p></body></html>
+
+    # -------------------------------------------------------------------------
+    # TLS certificate
+    # -------------------------------------------------------------------------
+    - name: Create TLS cert directory
+      ansible.builtin.file:
+        path: "{{ cert_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Check if cert and key exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ cert_dir }}/server.crt"
+        - "{{ cert_dir }}/server.key"
+      register: cert_stat
+
+    - name: Generate self-signed certificate
+      ansible.builtin.command: >
+        openssl req -x509 -nodes -newkey rsa:2048
+        -keyout {{ cert_dir }}/server.key
+        -out    {{ cert_dir }}/server.crt
+        -days 365
+        -subj "/CN={{ cert_cn }}/O=SENTINEL-LAB/C=TN"
+      when: >
+        not (cert_stat.results[0].stat.exists and
+             cert_stat.results[1].stat.exists)
+
+    - name: Lock down cert permissions
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ cert_dir }}/server.crt", mode: "0644" }
+        - { path: "{{ cert_dir }}/server.key", mode: "0600" }
+
+    # -------------------------------------------------------------------------
+    # Weak vhost
+    # -------------------------------------------------------------------------
+    - name: Deploy INTENTIONALLY WEAK TLS vhost
+      ansible.builtin.copy:
+        dest: "{{ vhost_path }}"
+        mode: "0644"
+        content: |
+          # SENTINEL-AI weak-TLS scenario vhost — DELIBERATELY INSECURE
+          server {
+              listen 443 ssl;
+              server_name {{ cert_cn }};
+
+              ssl_certificate     {{ cert_dir }}/server.crt;
+              ssl_certificate_key {{ cert_dir }}/server.key;
+
+              # --- WEAK on purpose ---
+              ssl_protocols       TLSv1 TLSv1.1 TLSv1.2;
+              ssl_ciphers         "DEFAULT:@SECLEVEL=0";
+              ssl_prefer_server_ciphers off;
+              # -----------------------
+
+              root  {{ web_root }};
+              index index.html;
+          }
+
+    - name: Enable the weak vhost
+      ansible.builtin.file:
+        src:  "{{ vhost_path }}"
+        dest: "{{ vhost_link }}"
+        state: link
+
+    # -------------------------------------------------------------------------
+    # Reload systemd (clean up v3/v4 drop-in), then hard restart nginx so it
+    # re-initialises OpenSSL and picks up the patched openssl.cnf
+    # -------------------------------------------------------------------------
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Hard restart nginx (re-init OpenSSL with patched system cnf)
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+
+    # -------------------------------------------------------------------------
+    # Validate config and verify TLS 1.0/1.1 actually negotiate
+    # -------------------------------------------------------------------------
+    - name: Validate nginx config
+      ansible.builtin.command: nginx -t
+      register: nginx_test
+      changed_when: false
+
+    - name: Abort if nginx config invalid
+      ansible.builtin.fail:
+        msg: "nginx -t failed: {{ nginx_test.stderr }}"
+      when: nginx_test.rc != 0
+
+    - name: Probe TLS 1.0 — expect CONNECTED + Protocol TLSv1
+      ansible.builtin.shell: >
+        openssl s_client -connect 127.0.0.1:443
+        -tls1 -no_tls1_1 -no_tls1_2 -no_tls1_3
+        </dev/null 2>&1 | grep -E 'Protocol|Cipher|CONNECTED|error|alert'
+      register: tls10_probe
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Probe TLS 1.1 — expect CONNECTED + Protocol TLSv1.1
+      ansible.builtin.shell: >
+        openssl s_client -connect 127.0.0.1:443
+        -tls1_1 -no_tls1 -no_tls1_2 -no_tls1_3
+        </dev/null 2>&1 | grep -E 'Protocol|Cipher|CONNECTED|error|alert'
+      register: tls11_probe
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Probe TLS 1.2 — expect CONNECTED
+      ansible.builtin.shell: >
+        openssl s_client -connect 127.0.0.1:443 -tls1_2
+        </dev/null 2>&1 | grep -E 'Protocol|Cipher|CONNECTED'
+      register: tls12_probe
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Show listening state
+      ansible.builtin.command: ss -tlnp
+      register: listen_state
+      changed_when: false
+
+    - name: Verify openssl.cnf was patched
+      ansible.builtin.shell: grep -A4 'system_default_sect' {{ system_ssl_cnf }} | tail -4
+      register: cnf_check
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "=== SENTINEL-AI weak-TLS baseline v5 ==="
+          - "Host              : {{ inventory_hostname }}"
+          - "Listening 443     : {{ '443' in listen_state.stdout }}"
+          - "openssl.cnf patch : {{ cnf_check.stdout }}"
+          - "TLS 1.0 probe     : {{ tls10_probe.stdout | default('NO OUTPUT — still blocked') }}"
+          - "TLS 1.1 probe     : {{ tls11_probe.stdout | default('NO OUTPUT — still blocked') }}"
+          - "TLS 1.2 probe     : {{ tls12_probe.stdout | default('NO OUTPUT') }}"
+          - "Backup            : {{ backup_ssl_cnf }}"
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes

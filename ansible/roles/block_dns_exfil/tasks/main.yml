@@ -1,0 +1,35 @@
+---
+- name: Validate attacker_ip
+  ansible.builtin.fail:
+    msg: "attacker_ip is required for block_dns_exfil"
+  when: attacker_ip == ""
+
+- name: Ensure dnsdist block marker exists
+  ansible.builtin.lineinfile:
+    path: "{{ dnsdist_config_path }}"
+    line: "{{ dnsdist_block_marker }}"
+    insertafter: EOF
+    state: present
+  when: not dry_run | bool
+
+- name: Add dnsdist DropAction for attacker IP (idempotent)
+  ansible.builtin.lineinfile:
+    path: "{{ dnsdist_config_path }}"
+    line: 'addAction(NetmaskGroupRule(newNMG():addMask("{{ attacker_ip }}/32")), DropAction())  -- {{ dns_exfil_incident_id }}'
+    insertafter: "{{ dnsdist_block_marker }}"
+    state: present
+  when: not dry_run | bool
+  notify: restart dnsdist
+
+- name: Flush dnsdist cache (in-flight queries dropped immediately)
+  ansible.builtin.shell: |
+    dnsdist -c 127.0.0.1 -k '' -e 'clearQueryCounters()' 2>/dev/null || true
+  when: not dry_run | bool
+  ignore_errors: true
+
+- name: Log DoH exfil block action
+  ansible.builtin.lineinfile:
+    path: /var/log/sentinel-ai-responses.log
+    line: "{{ ansible_date_time.iso8601 }} | BLOCK_DNS_EXFIL | {{ attacker_ip }} | incident={{ dns_exfil_incident_id }} | {{ dns_exfil_comment }}"
+    create: yes
+    mode: '0644'

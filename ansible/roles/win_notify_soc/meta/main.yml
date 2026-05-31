@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  author: SENTINEL-AI
+  description: win_notify_soc (Windows)
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Windows
+      versions: [all]
+dependencies: []

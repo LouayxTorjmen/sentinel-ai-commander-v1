@@ -1,0 +1,16 @@
+---
+# SENTINEL-AI — Response Playbook: block_ip
+# Blocks a source IP via iptables on the target host.
+# Triggered by: port scan / recon detection (Suricata rules 86601, 87702, 40503)
+- name: "SENTINEL-AI Response: Block attacker IP"
+  hosts: "{{ target_hosts | default('Ubuntu-agent-web') }}"
+  gather_facts: yes
+  become: true
+  vars:
+    block_ip_address: "{{ source_ip | default('') }}"
+    block_ip_comment: "SENTINEL-AI block - incident {{ incident_id | default('unknown') }}"
+    block_duration_seconds: 3600
+    block_chain: "SENTINEL_BLOCK"
+    dry_run: false
+  roles:
+    - block_ip

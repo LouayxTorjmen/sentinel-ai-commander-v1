@@ -1,0 +1,44 @@
+---
+- name: SENTINEL-AI — AD-CS ESC1 Abuse Containment
+  hosts: "{{ target_hosts | default('srv-ad-dns') }}"
+  gather_facts: yes
+  become: false
+
+  pre_tasks:
+    - name: Require ca_name
+      ansible.builtin.fail:
+        msg: "ca_name is required for AD-CS abuse containment"
+      when: ca_name == ""
+
+    - name: Require template_name
+      ansible.builtin.fail:
+        msg: "template_name is required for AD-CS abuse containment"
+      when: template_name == ""
+
+  roles:
+    - role: win_collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+        evidence_target_ip: "{{ source_ip | default('') }}"
+        collect_processes: true
+        collect_network: true
+        collect_event_log: true
+        collect_memory: false
+
+    - role: win_block_adcs_abuse
+      vars:
+        adcs_incident_id: "{{ incident_id }}"
+        adcs_comment: "SENTINEL-AI: ESC1 abuse on {{ template_name }} — incident {{ incident_id }}"
+
+    - role: win_notify_soc
+      vars:
+        notify_subject: "AD-CS ESC1 Abuse Contained: {{ template_name }}"
+        notify_severity: "{{ severity | default('high') }}"
+        notify_incident_id: "{{ incident_id }}"
+        notify_message: >-
+          ESC1 certificate abuse detected on CA {{ ca_name }}.
+          Vulnerable template {{ template_name }} unpublished from the CA and removed from the
+          CertificateTemplates registry. Issued certificate
+          (request {{ request_id | default('n/a') }}, serial {{ cert_serial | default('resolved-at-runtime') }})
+          revoked with reason keyCompromise and a fresh CRL published.
+          Requester was {{ requester | default('unknown') }}. Evidence collected under incident {{ incident_id }}.

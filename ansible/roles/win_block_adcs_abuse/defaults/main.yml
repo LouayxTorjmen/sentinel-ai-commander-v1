@@ -1,0 +1,12 @@
+---
+# Defaults for win_block_adcs_abuse
+ca_name: ""
+template_name: ""
+request_id: ""
+cert_serial: ""
+requester: ""
+adcs_incident_id: "{{ incident_id | default('adhoc') }}"
+adcs_comment: "SENTINEL-AI: AD-CS ESC1 abuse contained"
+adcs_log_path: "C:\\SentinelEvidence\\sentinel-ai-responses.log"
+evidence_dir: "C:\\SentinelEvidence"
+dry_run: false

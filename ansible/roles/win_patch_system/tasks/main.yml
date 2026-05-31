@@ -1,0 +1,36 @@
+---
+# Use ansible.windows.win_updates - the canonical module for Windows patching
+- name: Install specific KBs if listed
+  ansible.windows.win_updates:
+    accept_list: "{{ patch_kb_ids }}"
+    category_names:
+      - SecurityUpdates
+      - CriticalUpdates
+    reboot: "{{ patch_reboot_if_needed | bool }}"
+  when:
+    - not dry_run | bool
+    - patch_kb_ids | length > 0
+  register: patch_specific
+  ignore_errors: true
+
+- name: Install all security updates (no specific KB given)
+  ansible.windows.win_updates:
+    category_names:
+      - SecurityUpdates
+      - CriticalUpdates
+    reboot: "{{ patch_reboot_if_needed | bool }}"
+  when:
+    - not dry_run | bool
+    - patch_kb_ids | length == 0
+  register: patch_all
+  ignore_errors: true
+
+- name: Trigger Windows Update scan if module-based install failed
+  ansible.windows.win_shell: |
+    wuauclt /detectnow /updatenow 2>&1
+    UsoClient.exe StartScan
+  when:
+    - not dry_run | bool
+    - (patch_specific is failed) or (patch_all is failed)
+  changed_when: false
+  ignore_errors: true

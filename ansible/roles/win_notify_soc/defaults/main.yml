@@ -1,0 +1,7 @@
+---
+notify_subject: ""
+notify_severity: "medium"
+notify_incident_id: ""
+notify_message: ""
+notify_webhook_url: ""
+notify_log_path: "C:\\SentinelEvidence\\sentinel-ai-responses.log"

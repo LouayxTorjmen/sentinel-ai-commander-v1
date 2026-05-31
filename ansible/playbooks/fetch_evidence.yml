@@ -1,0 +1,69 @@
+---
+- name: Pull SENTINEL-AI evidence (Linux)
+  hosts: linux_agents
+  gather_facts: no
+  become: true
+  tasks:
+    - name: List evidence files
+      ansible.builtin.find:
+        paths:
+          - /var/sentinel-evidence
+          - /var/log
+        patterns: "sentinel-ai-*"
+        recurse: yes
+      register: linux_files
+      ignore_errors: yes
+
+    - name: Read response log
+      ansible.builtin.slurp:
+        src: /var/log/sentinel-ai-responses.log
+      register: linux_log
+      ignore_errors: yes
+
+    - name: Save to localhost
+      ansible.builtin.copy:
+        content: "{{ (linux_log.content | default('') | b64decode) }}"
+        dest: "/tmp/evidence/{{ inventory_hostname }}_responses.log"
+      delegate_to: localhost
+      become: false
+      ignore_errors: yes
+
+    - name: Save file list
+      ansible.builtin.copy:
+        content: "{{ linux_files.files | default([]) | to_nice_json }}"
+        dest: "/tmp/evidence/{{ inventory_hostname }}_files.json"
+      delegate_to: localhost
+      become: false
+
+- name: Pull SENTINEL-AI evidence (Windows)
+  hosts: windows_agents
+  gather_facts: no
+  become: false
+  tasks:
+    - name: List evidence files
+      ansible.windows.win_find:
+        paths: C:\SentinelEvidence
+        recurse: yes
+      register: win_files
+      ignore_errors: yes
+
+    - name: Read response log
+      ansible.windows.slurp:
+        src: C:\SentinelEvidence\sentinel-ai-responses.log
+      register: win_log
+      ignore_errors: yes
+
+    - name: Save to localhost
+      ansible.builtin.copy:
+        content: "{{ (win_log.content | default('') | b64decode) }}"
+        dest: "/tmp/evidence/{{ inventory_hostname }}_responses.log"
+      delegate_to: localhost
+      become: false
+      ignore_errors: yes
+
+    - name: Save file list
+      ansible.builtin.copy:
+        content: "{{ win_files.files | default([]) | to_nice_json }}"
+        dest: "/tmp/evidence/{{ inventory_hostname }}_files.json"
+      delegate_to: localhost
+      become: false

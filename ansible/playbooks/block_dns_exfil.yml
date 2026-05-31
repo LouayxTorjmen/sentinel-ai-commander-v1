@@ -1,0 +1,40 @@
+---
+- name: SENTINEL-AI — DoH Exfiltration Block
+  hosts: "{{ target_hosts | default('auto-victim1-ubuntu') }}"
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Validate source IP
+      ansible.builtin.fail:
+        msg: "source_ip is required for DoH exfiltration block"
+      when: source_ip == ""
+
+  roles:
+    - role: collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+        evidence_target_ip: "{{ source_ip }}"
+        collect_memory: false
+
+    - role: block_ip
+      vars:
+        block_ip_address: "{{ source_ip }}"
+        block_ip_comment: "SENTINEL-AI: DoH exfiltration — incident {{ incident_id }}"
+        block_duration_seconds: 3600
+
+    - role: block_dns_exfil
+      vars:
+        attacker_ip: "{{ source_ip }}"
+        dns_exfil_incident_id: "{{ incident_id }}"
+        dns_exfil_comment: "SENTINEL-AI: DoH exfiltration — incident {{ incident_id }}"
+
+    - role: notify_soc
+      vars:
+        notify_subject: "DoH Exfiltration Blocked"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"
+        notify_message: |
+          4-layer DoH exfiltration detected and blocked.
+          Source IP {{ source_ip }} dropped at iptables and added to dnsdist DropAction list.
+          dnsdist was reloaded to apply the new ACL.
+          Evidence collected under incident {{ incident_id }}.

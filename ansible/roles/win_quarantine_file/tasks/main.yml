@@ -1,0 +1,49 @@
+---
+- name: Validate file_path
+  ansible.builtin.fail:
+    msg: "quarantine_file_path is required"
+  when: quarantine_file_path == ""
+
+- name: Ensure quarantine directory exists
+  ansible.windows.win_file:
+    path: "{{ quarantine_dir }}"
+    state: directory
+  when: not dry_run | bool
+
+- name: Compute file hash before quarantine (forensics)
+  ansible.windows.win_shell: |
+    if (Test-Path "{{ quarantine_file_path }}") {
+      Get-FileHash -Algorithm SHA256 "{{ quarantine_file_path }}" |
+        Select-Object Hash, Path | ConvertTo-Json
+    } else {
+      '{"error":"file not found"}'
+    }
+  register: file_hash
+  changed_when: false
+  ignore_errors: true
+
+- name: Move file to quarantine and rename with timestamp
+  ansible.windows.win_shell: |
+    $src = "{{ quarantine_file_path }}"
+    $name = [System.IO.Path]::GetFileName($src)
+    $ts = (Get-Date).ToString("yyyyMMdd-HHmmss")
+    $dest = "{{ quarantine_dir }}\${ts}_${name}.quarantined"
+    if (Test-Path $src) {
+      Move-Item -LiteralPath $src -Destination $dest -Force
+      # Deny ALL access to the quarantined file
+      icacls $dest /inheritance:r /deny "Everyone:(F)" 2>&1 | Out-Null
+      Write-Output $dest
+    } else {
+      Write-Output "NOT_FOUND"
+    }
+  register: quarantine_result
+  when: not dry_run | bool
+  changed_when: "'NOT_FOUND' not in quarantine_result.stdout"
+
+- name: Log quarantine to SENTINEL-AI evidence file
+  ansible.windows.win_copy:
+    dest: "C:\\SentinelEvidence\\quarantine.log"
+    content: |
+      {{ ansible_date_time.iso8601 | default('') }} | {{ quarantine_reason }} | src={{ quarantine_file_path }} | dest={{ quarantine_result.stdout | default('n/a') | trim }} | hash={{ file_hash.stdout | default('n/a') | trim }}
+  when: not dry_run | bool
+  ignore_errors: true

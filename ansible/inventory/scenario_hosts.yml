@@ -1,0 +1,80 @@
+---
+# ─────────────────────────────────────────────────────────────────────
+# SENTINEL-AI :: Scenario lab inventory (5 DMZ victims)
+# ─────────────────────────────────────────────────────────────────────
+# Static inventory for the MITRE ATT&CK attack scenario lab.
+# Kept separate from dynamic_inventory.py output (hosts.ini) so it
+# doesn't get clobbered when the dynamic generator runs.
+#
+# Paths are CONTAINER-INTERNAL (mapped via ./ansible:/ansible volume):
+#   /ansible/keys/id_rsa  ←  ~/sentinel-ai-commander/ansible/keys/id_rsa
+#
+# Run from the ansible-runner container:
+#   docker exec -it sentinel-ansible-runner ansible-playbook \
+#     -i /ansible/inventory/scenario_hosts.yml \
+#     /ansible/playbooks/seed_scenario_state.yml
+# ─────────────────────────────────────────────────────────────────────
+
+all:
+  vars:
+    ansible_python_interpreter: auto_silent
+
+linux_victims:
+  hosts:
+    srv-dns-bind:
+      ansible_host: 10.50.0.11
+      ansible_user: louay
+      ansible_become: true
+      ansible_become_method: sudo
+      ansible_become_password: Louay2002
+
+    srv-web:
+      ansible_host: 10.50.0.12
+      ansible_user: louay
+      ansible_become: true
+      ansible_become_method: sudo
+      ansible_become_password: Louay2002
+
+    srv-sql:
+      ansible_host: 10.50.0.13
+      ansible_user: root
+      # No become — already root
+
+  vars:
+    ansible_connection: ssh
+    ansible_ssh_private_key_file: /ansible/keys/id_rsa
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+windows_victims:
+  hosts:
+    srv-ad-dns:
+      ansible_host: 10.50.0.10
+      ansible_user: administrator
+      ansible_password: Louay2002
+      is_domain_controller: true
+      domain_name: mydomain.local
+      domain_netbios: MYDOMAIN
+
+    srv-ftp:
+      ansible_host: 10.50.0.14
+      ansible_user: Louay-Windows
+      ansible_password: Louay2002
+      is_domain_controller: false
+
+  vars:
+    ansible_connection: winrm
+    ansible_port: 5985
+    ansible_winrm_transport: basic
+    ansible_winrm_server_cert_validation: ignore
+    ansible_winrm_scheme: http
+    ansible_shell_type: powershell
+    ansible_python_interpreter: null
+# ─── Per-task host groupings ─────────────────────────────────────────
+
+sql_host:
+  hosts:
+    srv-sql:
+
+ad_hosts:
+  hosts:
+    srv-ad-dns:

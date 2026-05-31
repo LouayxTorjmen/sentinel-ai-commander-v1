@@ -1,0 +1,154 @@
+<!--
+  SENTINEL-AI Manager Rules — srv-dns-bind (agent 014) additions
+  Append this block to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+  before the closing of the file. Then docker-cp + container recreate to deploy.
+
+  Two sections:
+    1. Noise suppression: lower the level of routine events from this host
+    2. Service-specific high-value rules for BIND DNS
+-->
+
+<group name="sentinel,srv-dns-bind,noise_suppression">
+
+  <!-- Suppress routine PAM session noise from this specific agent.
+       PAM 5501/5502 fire on every sudo and every login: too noisy for
+       a single-service DNS box where SSH is admin-only and infrequent.
+       Use level 0 = "silently routed, not alerted on". -->
+
+  <rule id="100140" level="0">
+    <if_sid>5501</if_sid>
+    <agent_name>auto-victim1-ubuntu</agent_name>
+    <description>PAM session opened (srv-dns-bind: suppressed routine)</description>
+  </rule>
+
+  <rule id="100141" level="0">
+    <if_sid>5502</if_sid>
+    <agent_name>auto-victim1-ubuntu</agent_name>
+    <description>PAM session closed (srv-dns-bind: suppressed routine)</description>
+  </rule>
+
+  <!-- Successful sudo: keep but downgrade from 3 to 0 except from non-mgmt subnet.
+       Mgmt VLAN is 10.99.0.0/24. Sudo from anywhere else is suspicious. -->
+
+  <rule id="100142" level="0">
+    <if_sid>5402</if_sid>
+    <agent_name>auto-victim1-ubuntu</agent_name>
+    <description>Successful sudo (srv-dns-bind: routine from mgmt)</description>
+  </rule>
+
+  <rule id="100143" level="7">
+    <if_sid>5402</if_sid>
+    <agent_name>auto-victim1-ubuntu</agent_name>
+    <field name="srcip">!10.99.0.</field>
+    <description>Suspicious sudo on srv-dns-bind from non-mgmt: $(srcip)</description>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-dns-bind,bind_specific">
+
+  <!-- BIND config file tampering. /etc/bind/named.conf, named.conf.options,
+       named.conf.local, named.conf.default-zones are all critical.
+       Triggered by FIM rules 550 (modified), 553 (deleted), 554 (added). -->
+
+  <rule id="100120" level="12">
+    <if_sid>550,553,554</if_sid>
+    <agent_name>auto-victim1-ubuntu</agent_name>
+    <field name="file">^/etc/bind/.*\.conf</field>
+    <description>BIND configuration file modified: $(file)</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+  <!-- BIND zone file modification.
+       Zone files live in /etc/bind/db.* or /var/named/ or /var/lib/bind/.
+       Any change is a high-confidence integrity event. -->
+
+  <rule id="100121" level="11">
+    <if_sid>550,553,554</if_sid>
+    <agent_name>auto-victim1-ubuntu</agent_name>
+    <field name="file">^/(etc/bind/db\.|var/named/|var/lib/bind/)</field>
+    <description>BIND zone data modified: $(file)</description>
+    <mitre>
+      <id>T1565.001</id>
+    </mitre>
+    <group>data_integrity,impact,</group>
+  </rule>
+
+  <!-- Falco saw the named process writing files outside its normal zones.
+       The named daemon should ONLY write to its journal files (.jnl).
+       Any other write by named = compromise indicator. -->
+
+  <rule id="100122" level="13">
+    <if_sid>100110</if_sid>
+    <field name="output_fields.proc.name">named</field>
+    <field name="evt.type">write|writev|openat</field>
+    <description>BIND named process writing unexpected file: $(output_fields.fd.name)</description>
+    <mitre>
+      <id>T1574</id>
+    </mitre>
+    <group>process_injection,defense_evasion,</group>
+  </rule>
+
+  <!-- High-entropy DNS query name = likely DGA (Domain Generation Algorithm).
+       Real DGA detection needs entropy scoring which OSSEC regex can't do
+       directly, but we can flag obviously-random strings: 20+ char hostname
+       with no vowels or with mixed digits and letters at random positions.
+       This is a starter heuristic — a real DGA detector would be a custom
+       script feeding into a Wazuh integration. -->
+
+  <rule id="100123" level="9">
+    <if_sid>100100</if_sid>
+    <field name="query_name">^[a-z0-9]{20,}\..*$</field>
+    <description>Suspicious long random-looking DNS query: $(query_name) from $(srcip)</description>
+    <mitre>
+      <id>T1568.002</id>
+    </mitre>
+    <group>dga,c2,command_and_control,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,correlation,cross_source">
+
+  <!-- DNS recon by tool: Suricata applayer mismatch (rule 86601) fires when
+       nmap/zmap probes hit BIND with non-conformant protocol traffic. If
+       this same source IP also caused a DNS query (rule 100100) within
+       30 seconds, that's high-confidence automated reconnaissance.
+
+       Note: this rule fires off the SURICATA event, not the BIND event.
+       It uses if_matched_sid to chain on rule 86601 and same_field srcip
+       to require correlation on source IP. -->
+
+  <rule id="100130" level="12" frequency="2" timeframe="30">
+    <if_matched_sid>86601</if_matched_sid>
+    <if_matched_sid>100100</if_matched_sid>
+    <description>Coordinated DNS recon: Suricata + BIND saw probes from $(srcip)</description>
+    <mitre>
+      <id>T1595</id>
+      <id>T1590</id>
+    </mitre>
+    <group>recon,correlation,</group>
+  </rule>
+
+  <!-- Zone tampering correlated with unexpected admin: rule 100121 (zone
+       file modified) followed by 5402 (sudo to root) within 5 minutes by
+       a user other than the expected admin user. Detects an attacker who
+       compromised an account and is modifying DNS to redirect traffic. -->
+
+  <rule id="100131" level="13" frequency="2" timeframe="300">
+    <if_matched_sid>100121</if_matched_sid>
+    <if_matched_sid>5402</if_matched_sid>
+    <description>Possible DNS tampering: zone file modified + sudo from non-routine user</description>
+    <mitre>
+      <id>T1565.001</id>
+    </mitre>
+    <group>data_integrity,correlation,</group>
+  </rule>
+
+</group>

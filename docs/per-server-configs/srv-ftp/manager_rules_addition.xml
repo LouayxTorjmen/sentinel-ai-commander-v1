@@ -1,0 +1,213 @@
+<!--
+  SENTINEL-AI Manager Rules — srv-ftp (agent 085) additions
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  Sections:
+    1. Noise suppression for srv-ftp agent
+    2. IIS FTP / HTTP specific rules
+    3. Cross-source correlation
+-->
+
+<group name="sentinel,srv-ftp,noise_suppression">
+
+  <!-- OneDrive accessing Explorer = routine OneDrive update flow -->
+  <rule id="100240" level="0">
+    <if_sid>92910</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>OneDrive Explorer access (srv-ftp: suppressed routine)</description>
+  </rule>
+
+  <!-- taskschd.dll loaded by random process = FP at boot/system idle -->
+  <rule id="100241" level="0">
+    <if_sid>92154</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>taskschd.dll loaded (srv-ftp: suppressed routine)</description>
+  </rule>
+
+  <!-- BluetoothUserService_NNN (numerical suffix) is per-user system service -->
+  <rule id="100242" level="0">
+    <if_sid>92307</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>BluetoothUserService</match>
+    <description>BT user service registration (srv-ftp: suppressed routine)</description>
+  </rule>
+
+  <rule id="100243" level="0">
+    <if_sid>92307</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>CaptureService|CDPUserSvc|OneSyncSvc|PimIndexMaintenanceSvc|UnistoreSvc|UserDataSvc|WpnUserService</match>
+    <description>Per-user system service registration (srv-ftp: suppressed)</description>
+  </rule>
+
+  <!-- WinRM localhost-to-localhost (IPv6 loopback) -->
+  <rule id="100244" level="0">
+    <if_sid>92110</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>0:0:0:0:0:0:0:1</match>
+    <description>WinRM loopback (srv-ftp: suppressed loopback)</description>
+  </rule>
+
+  <!-- System time changed: routine NTP sync. Downgrade not suppress
+       (huge time jumps are still interesting). -->
+  <rule id="100245" level="3">
+    <if_sid>60132</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>System time changed (srv-ftp: routine NTP)</description>
+  </rule>
+
+  <!-- Software protection service (Windows activation) -->
+  <rule id="100246" level="0">
+    <if_sid>60642</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>Software protection service (srv-ftp: suppressed routine)</description>
+  </rule>
+
+  <!-- CIS benchmark failures: keep one-time install state silent.
+       Wazuh's 19xxx rules are CIS findings; we suppress 19009 (password
+       history) and 19010 (others) as one-time install configs. -->
+  <rule id="100247" level="0">
+    <if_sid>19009</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>CIS benchmark password history (srv-ftp: install state, suppressed)</description>
+  </rule>
+
+  <!-- PowerShell file ops: downgrade -->
+  <rule id="100248" level="3">
+    <if_sid>92021</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>PowerShell deleted files (srv-ftp: routine)</description>
+  </rule>
+
+  <rule id="100249" level="3">
+    <if_sid>92205</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>PowerShell created exe in Windows root (srv-ftp: routine installer)</description>
+  </rule>
+
+  <rule id="100250" level="3">
+    <if_sid>92031</if_sid>
+    <hostname>srv-ftp</hostname>
+    <description>Discovery activity (srv-ftp: Defender benign)</description>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-ftp,iis_specific">
+
+  <!-- FTP brute force: 5+ failed FTP login events in 60s.
+       Wazuh has built-in IIS FTP rules. Event 4625 (failed logon)
+       with workstation source IP matching FTP traffic = brute force.
+       In practice, we look for repeated 4625 from same source. -->
+
+  <rule id="100230" level="12" frequency="5" timeframe="60">
+    <if_matched_sid>60122</if_matched_sid>
+    <hostname>srv-ftp</hostname>
+    <description>FTP/RDP/Windows brute force on srv-ftp: 5+ failed logons in 60s</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failures,brute_force,</group>
+  </rule>
+
+  <!-- HTTP webshell drop: FIM file added under wwwroot with web-script ext.
+       Wazuh emits FIM events as syscheck rule 554 (file added). We
+       use <match> against the raw event for the path + extension. -->
+
+  <rule id="100231" level="14">
+    <if_sid>554</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>C:\\inetpub\\wwwroot\\</match>
+    <description>POSSIBLE HTTP WEBSHELL DROP on srv-ftp: $(file)</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>webshell,persistence,</group>
+  </rule>
+
+  <!-- FTP suspicious upload: same idea but in ftproot -->
+  <rule id="100232" level="11">
+    <if_sid>554</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>C:\\inetpub\\ftproot\\</match>
+    <description>FTP file uploaded on srv-ftp: $(file)</description>
+    <mitre>
+      <id>T1105</id>
+    </mitre>
+    <group>ingress_tool_transfer,</group>
+  </rule>
+
+  <!-- File create inside /inetpub by Sysmon EID 11 from non-IIS process.
+       Sysmon EID 11 = FileCreate. Our srv-ad-dns + srv-ftp ingest Sysmon.
+       Wazuh rule 61613 handles Sysmon EID 11. We filter for inetpub paths
+       and exclude legitimate IIS workers (w3wp.exe, ftpsvc, system). -->
+
+  <rule id="100233" level="13">
+    <if_sid>61613</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>C:\\inetpub\\</match>
+    <description>File create under /inetpub on srv-ftp by Sysmon EID 11 - check process</description>
+    <mitre>
+      <id>T1105</id>
+    </mitre>
+    <group>ingress_tool_transfer,</group>
+  </rule>
+
+  <!-- IIS service stopped (Windows event 7036 with FTPSVC or W3SVC).
+       Attackers often stop logging before further actions. -->
+
+  <rule id="100234" level="13">
+    <if_sid>10000,10001,10002,10003</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>FTPSVC|W3SVC</match>
+    <match>stopped</match>
+    <description>IIS service stopped on srv-ftp - possible defense evasion</description>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+    <group>defense_evasion,</group>
+  </rule>
+
+  <!-- IIS applicationHost.config modified - critical -->
+  <rule id="100235" level="14">
+    <if_sid>550,553,554</if_sid>
+    <hostname>srv-ftp</hostname>
+    <match>applicationHost.config</match>
+    <description>IIS applicationHost.config modified on srv-ftp</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,correlation,srv-ftp">
+
+  <!-- FTP brute force success: 100230 (brute force) + 60106 (Logon Success)
+       within 120s. Wazuh's normal logon-success rule is suppressed on this
+       host via 100240 family BUT only when scoped to this hostname AND
+       only the noisy variants — if there's an actual successful logon
+       right after a brute force, we still see it. -->
+
+  <rule id="100260" level="14" frequency="2" timeframe="120">
+    <if_matched_sid>100230</if_matched_sid>
+    <if_sid>60106</if_sid>
+    <description>SUCCESSFUL BRUTE FORCE on srv-ftp: brute force + successful logon</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>brute_force,correlation,</group>
+  </rule>
+
+  <!-- Webshell delivery: drop + access -->
+  <rule id="100261" level="15" frequency="2" timeframe="120">
+    <if_matched_sid>100231</if_matched_sid>
+    <if_matched_sid>61613</if_matched_sid>
+    <description>HIGH-CONFIDENCE HTTP WEBSHELL DELIVERY on srv-ftp</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>webshell,correlation,</group>
+  </rule>
+
+</group>

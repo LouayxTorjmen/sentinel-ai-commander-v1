@@ -1,0 +1,89 @@
+{
+  "ad_planted": {
+    "accounts": [
+      {
+        "attack_tool_hint": "impacket-GetNPUsers mydomain.com/ -no-pass -usersfile users.txt",
+        "password": "Summer2024!",
+        "sam": "svc-legacy",
+        "upn": "svc-legacy@mydomain.com",
+        "weakness": "AS-REP roastable (DoesNotRequirePreAuth=true)"
+      },
+      {
+        "attack_tool_hint": "impacket-GetUserSPNs mydomain.com/<user>:<pass> -request",
+        "password": "Welcome2024!",
+        "sam": "svc-mssql",
+        "spn": "MSSQLSvc/srv-sql.mydomain.com:1433",
+        "upn": "svc-mssql@mydomain.com",
+        "weakness": "Kerberoastable (SPN registered)"
+      }
+    ],
+    "dc": "10.50.0.10",
+    "domain": "mydomain.com"
+  },
+  "generated_at": "2026-05-15T19:44:00Z",
+  "mysql_planted": {
+    "database": "dvwa",
+    "decoy_creds_count": 2,
+    "dvwa_user_can_select": true,
+    "host": "10.50.0.13",
+    "real_creds_count": 5,
+    "sqli_dump_payload": "1' UNION SELECT username,password FROM infra_credentials-- -",
+    "table": "infra_credentials"
+  },
+  "scenario_seeded": true,
+  "targets": [
+    {
+      "ip": "10.50.0.10",
+      "name": "srv-ad-dns",
+      "role": "AD DC + DNS",
+      "services": [
+        53,
+        88,
+        135,
+        389,
+        445,
+        464,
+        636,
+        3268,
+        3269,
+        5985
+      ]
+    },
+    {
+      "ip": "10.50.0.11",
+      "name": "srv-dns-bind",
+      "role": "Unix DNS (BIND)",
+      "services": [
+        22,
+        53
+      ]
+    },
+    {
+      "ip": "10.50.0.12",
+      "name": "srv-web",
+      "role": "Web (DVWA)",
+      "services": [
+        22,
+        80
+      ]
+    },
+    {
+      "ip": "10.50.0.13",
+      "name": "srv-sql",
+      "role": "MySQL backend",
+      "services": [
+        22,
+        3306
+      ]
+    },
+    {
+      "ip": "10.50.0.14",
+      "name": "srv-ftp",
+      "role": "IIS FTP",
+      "services": [
+        21,
+        5985
+      ]
+    }
+  ]
+}

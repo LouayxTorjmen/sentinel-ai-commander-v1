@@ -1,0 +1,28 @@
+---
+- name: Need at least one identifier
+  ansible.builtin.fail:
+    msg: "kill_process_name or kill_process_pid is required"
+  when: kill_process_name == "" and (kill_process_pid is none or kill_process_pid == "")
+
+- name: Kill by PID (with optional process tree)
+  ansible.windows.win_shell: |
+    {% if kill_tree | bool %}
+    taskkill /F /T /PID {{ kill_process_pid }}
+    {% else %}
+    taskkill /F /PID {{ kill_process_pid }}
+    {% endif %}
+  when:
+    - not dry_run | bool
+    - kill_process_pid is not none
+    - kill_process_pid != ""
+  changed_when: false
+  ignore_errors: true
+
+- name: Kill by name (forcefully)
+  ansible.windows.win_shell: |
+    taskkill /F /IM "{{ kill_process_name }}"
+  when:
+    - not dry_run | bool
+    - kill_process_name != ""
+  changed_when: false
+  ignore_errors: true

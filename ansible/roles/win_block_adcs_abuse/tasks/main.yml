@@ -1,0 +1,134 @@
+---
+# Contain an AD-CS ESC1 abuse: disable the vulnerable template on the CA,
+# revoke the issued certificate, and record AD-CS-specific evidence.
+# Targets the Enterprise CA / domain controller (Windows).
+
+- name: Validate ca_name
+  ansible.builtin.fail:
+    msg: "ca_name is required for win_block_adcs_abuse"
+  when: ca_name == ""
+
+- name: Validate template_name
+  ansible.builtin.fail:
+    msg: "template_name is required for win_block_adcs_abuse"
+  when: template_name == ""
+
+- name: Ensure evidence directory exists
+  ansible.windows.win_file:
+    path: "{{ evidence_dir }}\\{{ adcs_incident_id }}"
+    state: directory
+
+# --- Evidence: capture the offending request + template state BEFORE changing anything ---
+
+- name: Capture the offending CA request row
+  ansible.windows.win_shell: |
+    certutil -view -restrict "RequestID={{ request_id }}" -out "RequestID,RequesterName,CertificateTemplate,SerialNumber,NotBefore,NotAfter,DispositionMessage" 2>&1 |
+      Out-File -Encoding utf8 "{{ evidence_dir }}\{{ adcs_incident_id }}\adcs_request_{{ request_id }}.txt"
+  when: request_id != ""
+  changed_when: false
+  ignore_errors: true
+
+- name: Capture vulnerable template definition (pre-removal)
+  ansible.windows.win_shell: |
+    $ConfigNC = (Get-ADRootDSE).configurationNamingContext
+    $base = 'CN=Certificate Templates,CN=Public Key Services,CN=Services,' + $ConfigNC
+    Get-ADObject -SearchBase $base -Filter "cn -eq '{{ template_name }}'" -Properties * -ErrorAction SilentlyContinue |
+      Out-File -Encoding utf8 "{{ evidence_dir }}\{{ adcs_incident_id }}\template_{{ template_name }}_pre.txt"
+  changed_when: false
+  ignore_errors: true
+
+# --- Enforcement step 1: unpublish the template from the CA (stops new enrollment) ---
+
+- name: Unpublish vulnerable template from CA (cmdlet)
+  ansible.windows.win_shell: |
+    try { Remove-CATemplate -Name '{{ template_name }}' -Force -ErrorAction Stop; "removed-via-cmdlet" }
+    catch { "cmdlet-failed: $($_.Exception.Message)" }
+  register: adcs_remove_cmdlet
+  when: not dry_run | bool
+  changed_when: "'removed-via-cmdlet' in adcs_remove_cmdlet.stdout"
+  ignore_errors: true
+
+- name: Strip template from CA registry CertificateTemplates (belt-and-suspenders)
+  ansible.windows.win_shell: |
+    $path = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\{{ ca_name }}'
+    $current = (Get-ItemProperty $path -ErrorAction SilentlyContinue).CertificateTemplates
+    if ($current) {
+      [string[]]$new = @($current | Where-Object { $_ -ne '{{ template_name }}' })
+      Set-ItemProperty $path -Name CertificateTemplates -Value $new
+      "registry-updated"
+    } else { "registry-empty-or-missing" }
+  register: adcs_registry
+  when: not dry_run | bool
+  changed_when: "'registry-updated' in adcs_registry.stdout"
+  ignore_errors: true
+
+- name: Restart certsvc to apply template removal
+  ansible.windows.win_shell: |
+    Restart-Service certsvc -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 5
+    certutil -catemplates 2>&1 | Select-String '{{ template_name }}'
+  register: adcs_post_check
+  when: not dry_run | bool
+  changed_when: false
+  ignore_errors: true
+
+# --- Enforcement step 2: revoke the issued certificate ---
+
+- name: Resolve serial number from request ID (if serial not supplied)
+  ansible.windows.win_shell: |
+    $out = certutil -view -restrict "RequestID={{ request_id }}" -out "SerialNumber" 2>&1 | Out-String
+    # Only match the quoted serial value on a data row: Serial Number: "<hex>"
+    # The header line has no quotes, so requiring quotes avoids matching it.
+    $m = [regex]::Match($out, 'Serial Number:\s*"([0-9a-fA-F]+)"')
+    if ($m.Success) { $m.Groups[1].Value } else { "" }
+  register: adcs_serial_lookup
+  when:
+    - cert_serial == ""
+    - request_id != ""
+  changed_when: false
+  ignore_errors: true
+
+- name: Set effective serial fact
+  ansible.builtin.set_fact:
+    adcs_effective_serial: "{{ cert_serial if cert_serial != '' else (adcs_serial_lookup.stdout | default('') | trim) }}"
+
+- name: Revoke the issued certificate (reason 1 = keyCompromise)
+  ansible.windows.win_shell: |
+    certutil -revoke {{ adcs_effective_serial }} 1 2>&1
+  register: adcs_revoke
+  when:
+    - not dry_run | bool
+    - adcs_effective_serial != ""
+  changed_when: "'completed successfully' in adcs_revoke.stdout"
+  ignore_errors: true
+
+- name: Publish a fresh CRL so the revocation takes effect immediately
+  ansible.windows.win_shell: |
+    certutil -crl 2>&1
+  when:
+    - not dry_run | bool
+    - adcs_effective_serial != ""
+  changed_when: false
+  ignore_errors: true
+
+# --- Evidence: post-action state ---
+
+- name: Record post-action containment summary
+  ansible.windows.win_copy:
+    dest: "{{ evidence_dir }}\\{{ adcs_incident_id }}\\adcs_containment.txt"
+    content: |
+      AD-CS ESC1 containment — incident {{ adcs_incident_id }}
+      CA              : {{ ca_name }}
+      Template        : {{ template_name }} (unpublished)
+      Requester       : {{ requester | default('unknown') }}
+      Request ID      : {{ request_id | default('n/a') }}
+      Cert serial     : {{ adcs_effective_serial | default('n/a') }}
+      Revocation      : {{ (adcs_revoke.stdout | default('skipped')) | trim }}
+      Template still on CA after removal: {{ (adcs_post_check.stdout | default('') | trim) | ternary('STILL PRESENT', 'removed') }}
+      Timestamp       : {{ ansible_date_time.iso8601 | default('') }}
+
+- name: Log AD-CS abuse block action
+  community.windows.win_lineinfile:
+    path: "{{ adcs_log_path }}"
+    line: "{{ ansible_date_time.iso8601 | default('') }} | BLOCK_ADCS_ABUSE | template={{ template_name }} ca={{ ca_name }} serial={{ adcs_effective_serial | default('n/a') }} | incident={{ adcs_incident_id }} | {{ adcs_comment }}"
+    create: yes

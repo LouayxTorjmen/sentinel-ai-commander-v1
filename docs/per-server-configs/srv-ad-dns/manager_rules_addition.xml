@@ -1,0 +1,184 @@
+<!--
+  SENTINEL-AI Manager Rules — srv-ad-dns (agent 081) additions
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  Sections:
+    1. Noise suppression for srv-ad-dns agent
+    2. AD / Kerberos-specific high-value rules
+    3. Cross-source correlation
+-->
+
+<group name="sentinel,srv-ad-dns,noise_suppression">
+
+  <!-- Routine logon/logoff suppression on DC.
+       A DC sees constant computer-account auth, service auth, replication
+       auth - these fire rules 60106 (success) and 60137 (logoff) hundreds
+       of times per hour. Level 0 silences alerting but events still
+       persist in the indexer for forensic review. -->
+
+  <rule id="100210" level="0">
+    <if_sid>60106</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Windows Logon Success (srv-ad-dns: suppressed routine)</description>
+  </rule>
+
+  <rule id="100211" level="0">
+    <if_sid>60137</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Windows User Logoff (srv-ad-dns: suppressed routine)</description>
+  </rule>
+
+  <!-- Suspicious cmd heuristic FP: 92052/92032 fire on every elevated cmd run.
+       On a DC during admin work, this is constant noise. -->
+
+  <rule id="100212" level="0">
+    <if_sid>92052</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Suspicious cmd (srv-ad-dns: suppressed routine admin)</description>
+  </rule>
+
+  <rule id="100213" level="0">
+    <if_sid>92032</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Suspicious cmd execution (srv-ad-dns: suppressed routine)</description>
+  </rule>
+
+  <!-- PowerShell file ops: downgrade rather than suppress. Keep at level 3
+       so they're still logged but don't generate alerts. If a real attack
+       uses PowerShell, the correlation rules below will catch it. -->
+
+  <rule id="100214" level="3">
+    <if_sid>92201</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>PowerShell script file in Temp (srv-ad-dns: routine)</description>
+  </rule>
+
+  <rule id="100215" level="3">
+    <if_sid>92021</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>PowerShell deleted files (srv-ad-dns: routine admin)</description>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-ad-dns,ad_specific">
+
+  <!-- AD brute force: 8+ failed logons (rule 60122) in 120s.
+       Wazuh rule 60122 already triggers on event 4625. Our rule
+       100200 escalates to a high-severity alert with MITRE T1110. -->
+
+  <rule id="100200" level="12" frequency="8" timeframe="120">
+    <if_matched_sid>60122</if_matched_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>AD brute force on srv-ad-dns: 8+ failed logons in 120s</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failures,brute_force,</group>
+  </rule>
+
+  <!-- LogonType=9 (NewCredentials) — possible Pass-the-Hash indicator.
+       Event 4624 with LogonType=9 is uncommon and suspicious unless
+       you're using RunAs /netonly. Filter against event 4624 base rules
+       (60106 is Logon Success; we want the specific LogonType=9). -->
+
+  <rule id="100201" level="11">
+    <if_sid>60106</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <match>LogonType":"9"</match>
+    <description>NewCredentials (Type 9) logon on srv-ad-dns - possible PTH</description>
+    <mitre>
+      <id>T1550.002</id>
+    </mitre>
+    <group>credential_access,authentication,</group>
+  </rule>
+
+  <!-- AD account creation (event 4720). Always notable on a DC.
+       Wazuh's default rule 60103 covers 4720 at low level. We
+       want this elevated. -->
+
+  <rule id="100202" level="10">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>AD user account created on srv-ad-dns</description>
+    <mitre>
+      <id>T1136.002</id>
+    </mitre>
+    <group>account_changed,persistence,</group>
+  </rule>
+
+  <!-- AS-REP roasting: Kerberos pre-auth failure events (4768 with
+       sub-status indicating pre-auth disabled). Burst detection. -->
+
+  <rule id="100203" level="13" frequency="5" timeframe="60">
+    <if_matched_sid>60108</if_matched_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <description>Possible AS-REP roasting on srv-ad-dns: 5+ Kerberos pre-auth failures in 60s</description>
+    <mitre>
+      <id>T1558.004</id>
+    </mitre>
+    <group>credential_access,kerberos,</group>
+  </rule>
+
+  <!-- Service installation (event 7045) where service binary is NOT
+       in System32. Legitimate Windows services live in System32. -->
+
+  <rule id="100204" level="12">
+    <if_sid>61156</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <match>ImagePath</match>
+    <description>Non-standard service install on srv-ad-dns: $(win.eventdata.imagePath)</description>
+    <mitre>
+      <id>T1543.003</id>
+    </mitre>
+    <group>persistence,service_creation,</group>
+  </rule>
+
+  <!-- Known credential-dumping tool process names via Sysmon EID 1.
+       Wazuh's 92xxx rules cover Sysmon - we filter on process names. -->
+
+  <rule id="100205" level="15">
+    <if_sid>61613</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <match>mimikatz|procdump|sekurlsa|kerberoast|rubeus|impacket-secretsdump</match>
+    <description>KNOWN CREDENTIAL DUMP TOOL on srv-ad-dns: $(win.eventdata.image)</description>
+    <mitre>
+      <id>T1003</id>
+    </mitre>
+    <group>credential_access,T1003,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,correlation,srv-ad-dns">
+
+  <!-- Failed logon burst + suspicious tool: brute force + dump tool used =
+       likely active attack. -->
+
+  <rule id="100220" level="15" frequency="2" timeframe="120">
+    <if_matched_sid>100200</if_matched_sid>
+    <if_matched_sid>100205</if_matched_sid>
+    <description>ACTIVE AD COMPROMISE on srv-ad-dns: brute force + credential dump tool</description>
+    <mitre>
+      <id>T1110</id>
+      <id>T1003</id>
+    </mitre>
+    <group>credential_access,correlation,</group>
+  </rule>
+
+  <!-- Service install + new account: classic post-compromise pattern.
+       Attacker establishes persistence via service AND creates a
+       backdoor account. -->
+
+  <rule id="100221" level="14" frequency="2" timeframe="300">
+    <if_matched_sid>100202</if_matched_sid>
+    <if_matched_sid>100204</if_matched_sid>
+    <description>POSSIBLE PERSISTENCE on srv-ad-dns: new account + non-std service within 5min</description>
+    <mitre>
+      <id>T1543.003</id>
+      <id>T1136.002</id>
+    </mitre>
+    <group>persistence,correlation,</group>
+  </rule>
+
+</group>

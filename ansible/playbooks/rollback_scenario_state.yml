@@ -1,0 +1,73 @@
+---
+# ─────────────────────────────────────────────────────────────────────
+# SENTINEL-AI :: Scenario lab rollback
+# ─────────────────────────────────────────────────────────────────────
+# Reverses everything seed_scenario_state.yml plants:
+#  - Drops dvwa.infra_credentials table
+#  - Removes svc-legacy and svc-mssql AD accounts
+#  - Deletes lab_state.json
+#
+# Run via wrapper:
+#   ./scripts/rollback_scenario.sh
+# ─────────────────────────────────────────────────────────────────────
+
+- name: "Rollback :: drop MySQL infra_credentials table"
+  hosts: sql_host
+  gather_facts: false
+  vars:
+    mysql_root_user: root
+    mysql_root_password: louay
+    db_name: dvwa
+    table_name: infra_credentials
+  tasks:
+    - name: "Drop table if exists"
+      community.mysql.mysql_query:
+        login_user: "{{ mysql_root_user }}"
+        login_password: "{{ mysql_root_password }}"
+        login_host: 127.0.0.1
+        login_db: "{{ db_name }}"
+        query: "DROP TABLE IF EXISTS {{ table_name }};"
+
+    - name: "Confirm dropped"
+      ansible.builtin.debug:
+        msg: "{{ db_name }}.{{ table_name }} removed (if it existed)"
+
+- name: "Rollback :: remove planted AD accounts"
+  hosts: ad_hosts
+  gather_facts: false
+  vars:
+    accounts_to_remove:
+      - svc-legacy
+      - svc-mssql
+  tasks:
+    - name: "Remove each AD account if present"
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'SilentlyContinue'
+        Import-Module ActiveDirectory
+        $u = Get-ADUser -Filter "SamAccountName -eq '{{ item }}'" -ErrorAction SilentlyContinue
+        if ($null -ne $u) {
+            Remove-ADUser -Identity '{{ item }}' -Confirm:$false
+            Write-Output "REMOVED: {{ item }}"
+        } else {
+            Write-Output "NOT FOUND (skipped): {{ item }}"
+        }
+      loop: "{{ accounts_to_remove }}"
+      register: removal_result
+
+    - name: "Show removal output"
+      ansible.builtin.debug:
+        msg: "{{ removal_result.results | map(attribute='stdout_lines') | list }}"
+
+- name: "Rollback :: delete lab_state.json"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Remove lab state file"
+      ansible.builtin.file:
+        path: /ansible/lab_state.json
+        state: absent
+
+    - name: "Done"
+      ansible.builtin.debug:
+        msg: "Rollback complete."

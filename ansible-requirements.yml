@@ -1,0 +1,23 @@
+---
+# ─────────────────────────────────────────────────────────────────────
+# Ansible Galaxy collection requirements
+# Install with:
+#   ansible-galaxy collection install -r ansible-requirements.yml
+# ─────────────────────────────────────────────────────────────────────
+
+collections:
+  # MySQL/MariaDB modules (mysql_query, mysql_user, mysql_db, ...)
+  - name: community.mysql
+    version: ">=3.10.0,<4.0.0"
+
+  # Windows modules (win_shell, win_user, win_service, win_feature, ...)
+  - name: ansible.windows
+    version: ">=2.4.0,<3.0.0"
+
+  # Extra Windows community modules (win_domain_user, win_dns_record, ...)
+  - name: community.windows
+    version: ">=2.3.0,<3.0.0"
+
+  # General community utilities used by many playbooks
+  - name: community.general
+    version: ">=8.0.0,<11.0.0"

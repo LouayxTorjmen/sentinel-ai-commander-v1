@@ -1,0 +1,44 @@
+---
+- name: Ensure log directory exists
+  ansible.windows.win_file:
+    path: "C:\\SentinelEvidence"
+    state: directory
+
+- name: Append to local response log
+  community.windows.win_lineinfile:
+    path: "{{ notify_log_path }}"
+    line: "{{ ansible_date_time.iso8601 | default('') }} | NOTIFY | [{{ notify_severity | upper }}] {{ notify_subject }} | incident={{ notify_incident_id }} | {{ notify_message }}"
+    create: yes
+
+- name: Register SentinelAI event source (idempotent)
+  ansible.windows.win_shell: |
+    if (-not [System.Diagnostics.EventLog]::SourceExists("SentinelAI")) {
+      New-EventLog -LogName Application -Source SentinelAI
+    }
+  changed_when: false
+  ignore_errors: true
+
+- name: Write to Windows Application event log
+  community.windows.win_eventlog_entry:
+    log: Application
+    source: SentinelAI
+    event_id: 9000
+    entry_type: Warning
+    message: "[{{ notify_severity | upper }}] {{ notify_subject }} | incident={{ notify_incident_id }} | {{ notify_message }}"
+  ignore_errors: true  # event source may not be registered yet
+
+- name: POST to SOC webhook if configured
+  ansible.windows.win_uri:
+    url: "{{ notify_webhook_url }}"
+    method: POST
+    body_format: json
+    body:
+      incident_id: "{{ notify_incident_id }}"
+      subject: "{{ notify_subject }}"
+      severity: "{{ notify_severity }}"
+      message: "{{ notify_message }}"
+      host: "{{ ansible_hostname }}"
+      timestamp: "{{ ansible_date_time.iso8601 | default('') }}"
+    status_code: [200, 201, 202, 204]
+  when: notify_webhook_url != ""
+  ignore_errors: true

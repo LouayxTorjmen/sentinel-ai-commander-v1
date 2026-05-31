@@ -1,0 +1,69 @@
+<!--
+  SENTINEL-AI Manager Rules — FIX for rule 100202 FP
+  Append to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  Problem: rule 100202 was firing on ANY Windows account-management event
+  parented to Wazuh rule 60103, not just genuine user creation (event 4720).
+  Wazuh rule 60103 chains MANY events:
+    - 4720 (account created)         <- what we want
+    - 4722 (account enabled)
+    - 4723 (password change)
+    - 4724 (password reset)
+    - 4725 (account disabled)
+    - 4738 (account changed)
+    - 4740 (account locked)
+    - 4767 (account unlocked)
+    - 4781 (account renamed)
+
+  Fix: scope rule 100202 to event ID 4720 specifically.
+-->
+
+<group name="sentinel,fixes">
+
+  <rule id="100202" level="10" overwrite="yes">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <field name="win.system.eventID">^4720$</field>
+    <description>AD user account CREATED on srv-ad-dns: $(win.eventdata.targetUserName)</description>
+    <mitre>
+      <id>T1136.002</id>
+    </mitre>
+    <group>account_changed,persistence,</group>
+  </rule>
+
+  <!-- New: account enabled (4722) - notable but less critical than created -->
+  <rule id="100206" level="8">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <field name="win.system.eventID">^4722$</field>
+    <description>AD user account enabled on srv-ad-dns: $(win.eventdata.targetUserName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>account_changed,</group>
+  </rule>
+
+  <!-- New: account password reset by an administrator (4724) - this is
+       different from user changing own password (4723). Password reset
+       requires admin privileges, so unexpected resets are suspicious. -->
+  <rule id="100207" level="9">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <field name="win.system.eventID">^4724$</field>
+    <description>AD admin-initiated password reset on srv-ad-dns: target=$(win.eventdata.targetUserName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>account_changed,</group>
+  </rule>
+
+  <!-- Suppress other routine 60103 events to keep dashboard clean
+       (account enabled/disabled/renamed/locked are operational events) -->
+  <rule id="100208" level="3">
+    <if_sid>60103</if_sid>
+    <hostname>WinServer2019-agent</hostname>
+    <field name="win.system.eventID">^(4725|4738|4740|4767|4781|4723)$</field>
+    <description>AD routine account event on srv-ad-dns (downgraded)</description>
+  </rule>
+
+</group>

@@ -138,6 +138,7 @@ class WazuhClient:
         level_gte: int = 0,
         sort: str = "-timestamp",
         query: Optional[str] = None,
+        timestamp_gte: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         body: Dict[str, Any] = {
             "size": min(limit, 500),
@@ -149,6 +150,10 @@ class WazuhClient:
         if level_gte > 0:
             body["query"]["bool"]["must"].append(
                 {"range": {"rule.level": {"gte": level_gte}}}
+            )
+        if timestamp_gte:
+            body["query"]["bool"]["must"].append(
+                {"range": {"@timestamp": {"gte": timestamp_gte}}}
             )
 
         if query:

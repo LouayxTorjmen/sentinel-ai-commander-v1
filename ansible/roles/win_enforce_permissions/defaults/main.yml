@@ -1,0 +1,7 @@
+---
+enforce_custom_paths: []
+enforce_default_paths:
+  - "C:\\Windows\\System32\\config"
+  - "C:\\Windows\\System32\\drivers\\etc"
+  - "C:\\inetpub"
+dry_run: false

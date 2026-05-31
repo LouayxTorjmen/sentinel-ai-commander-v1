@@ -1,0 +1,27 @@
+---
+- name: SENTINEL-AI — FIM Restore Response (Windows)
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+  become: false
+
+  pre_tasks:
+    - name: Require file_path
+      ansible.builtin.fail:
+        msg: "file_path is required"
+      when: file_path == ""
+
+  roles:
+    - role: win_collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+
+    - role: win_restore_file_baseline
+      vars:
+        restore_file_path: "{{ file_path }}"
+
+    - role: win_notify_soc
+      vars:
+        notify_subject: "Windows FIM file restored: {{ file_path }}"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"
+        notify_message: "File {{ file_path }} restored from baseline on {{ ansible_hostname }}"

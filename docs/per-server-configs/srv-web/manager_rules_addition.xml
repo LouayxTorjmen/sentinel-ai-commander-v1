@@ -1,0 +1,183 @@
+<!--
+  SENTINEL-AI Manager Rules — srv-web (agent 089) additions
+  Append this block to ~/sentinel-ai-commander/wazuh/config/manager/local_rules.xml
+
+  Sections:
+    1. FIX rule 100131 — was firing false positives during routine sudo
+    2. Noise suppression for srv-web agent
+    3. Service-specific high-value rules for Apache + DVWA + (nginx)
+    4. Cross-source correlation rules (Apache + Falco + Suricata)
+-->
+
+<!-- ─── FIX: rule 100131 was too loose ────────────────────────────── -->
+<!--
+     Replace the previous 100131 definition. We can't actually replace
+     in-place from an append-only file, so we DISABLE the old one by
+     redefining at a higher precedence and document the tightening.
+
+     Note: Wazuh fires rules by ID order, so a redefined ID with the
+     same number overrides the previous load. This works because rules
+     within a single XML file process top-down.
+
+     Tightened version requires:
+       - Rule 100121 (zone file modified) fires once
+       - Rule 5402 (sudo to root) fires once
+       - WITHIN 60 seconds (was 300s)
+       - Combined frequency stays at 2 — but now requires BOTH children
+-->
+
+<group name="sentinel,correlation,fixes">
+
+  <rule id="100131" level="13" frequency="2" timeframe="60" overwrite="yes">
+    <if_matched_sid>100121</if_matched_sid>
+    <if_sid>5402</if_sid>
+    <description>Possible DNS tampering: zone file modified within 60s of sudo to root</description>
+    <mitre>
+      <id>T1565.001</id>
+    </mitre>
+    <group>data_integrity,correlation,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-web,noise_suppression">
+
+  <!-- PAM session and routine sudo: suppress for srv-web only.
+       Same pattern as srv-dns-bind. -->
+
+  <rule id="100160" level="0">
+    <if_sid>5501</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <description>PAM session opened (srv-web: suppressed routine)</description>
+  </rule>
+
+  <rule id="100161" level="0">
+    <if_sid>5502</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <description>PAM session closed (srv-web: suppressed routine)</description>
+  </rule>
+
+  <rule id="100162" level="0">
+    <if_sid>5402</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <description>Successful sudo (srv-web: suppressed routine admin)</description>
+  </rule>
+
+</group>
+
+<group name="sentinel,srv-web,web_specific">
+
+  <!-- WEBSHELL DROP DETECTION — highest-value rule for this host.
+       FIM rule 554 (file added) on the DVWA uploads directory.
+       Use <match> against the raw event because <field name="file">
+       doesn't accept arbitrary regex (we learned this on srv-dns-bind). -->
+
+  <rule id="100150" level="13">
+    <if_sid>554</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>/var/www/html/dvwa/hackable/uploads/</match>
+    <description>POSSIBLE WEBSHELL DROP on srv-web: $(file)</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>webshell,persistence,T1505,</group>
+  </rule>
+
+  <!-- Apache config tampering -->
+  <rule id="100151" level="11">
+    <if_sid>550,553,554</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>/etc/apache2/</match>
+    <description>Apache config modified on srv-web: $(file)</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+  <!-- nginx config tampering (when nginx is added) -->
+  <rule id="100152" level="11">
+    <if_sid>550,553,554</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>/etc/nginx/</match>
+    <description>nginx config modified on srv-web: $(file)</description>
+    <mitre>
+      <id>T1562</id>
+    </mitre>
+    <group>config_tampering,defense_evasion,</group>
+  </rule>
+
+  <!-- TLS private key modification — critical -->
+  <rule id="100153" level="14">
+    <if_sid>550,553,554</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>/etc/ssl/private/</match>
+    <description>TLS private key modified on srv-web: $(file)</description>
+    <mitre>
+      <id>T1552.004</id>
+    </mitre>
+    <group>credential_access,T1552,</group>
+  </rule>
+
+  <!-- Apache process spawning shell-like child via Falco eBPF.
+       This is the webshell-exec smoking gun: Apache (apache2 / www-data)
+       should NEVER spawn bash, sh, dash, etc. -->
+
+  <rule id="100155" level="14">
+    <if_sid>100110</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>"proc.pname":"apache2"</match>
+    <match>"evt.type":"execve"</match>
+    <description>Apache spawned child process on srv-web — possible webshell exec</description>
+    <mitre>
+      <id>T1059.004</id>
+    </mitre>
+    <group>shell,T1059,T1505,</group>
+  </rule>
+
+  <!-- Apache process reading sensitive file via Falco -->
+  <rule id="100156" level="12">
+    <if_sid>100110</if_sid>
+    <hostname>Ubuntu-agent-web</hostname>
+    <match>"proc.name":"apache2"</match>
+    <match>"rule":"Read sensitive file</match>
+    <description>Apache process reading sensitive file on srv-web</description>
+    <mitre>
+      <id>T1083</id>
+    </mitre>
+    <group>file_discovery,T1083,</group>
+  </rule>
+
+</group>
+
+<group name="sentinel,correlation,srv-web">
+
+  <!-- Webshell delivery — FIM saw the file drop, Suricata sees HTTP
+       traffic to that path within 60 seconds. Both layers agreeing
+       gives high-confidence "attacker dropped + accessed webshell". -->
+
+  <rule id="100170" level="14" frequency="2" timeframe="60">
+    <if_matched_sid>100150</if_matched_sid>
+    <if_sid>86601</if_sid>
+    <description>HIGH-CONFIDENCE WEBSHELL DELIVERY on srv-web: drop + access correlated</description>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+    <group>webshell,correlation,persistence,</group>
+  </rule>
+
+  <!-- Reverse shell exfil from compromised web server: Apache spawned
+       shell + outbound network connect within 30 seconds. Detects the
+       webshell -> reverse-shell -> exfil chain. -->
+
+  <rule id="100171" level="15" frequency="2" timeframe="30">
+    <if_matched_sid>100155</if_matched_sid>
+    <if_matched_sid>100110</if_matched_sid>
+    <description>POSSIBLE REVERSE SHELL on srv-web: Apache shell + outbound connection</description>
+    <mitre>
+      <id>T1071.001</id>
+    </mitre>
+    <group>command_and_control,exfiltration,correlation,</group>
+  </rule>
+
+</group>

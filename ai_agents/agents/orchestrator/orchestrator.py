@@ -2,6 +2,7 @@ import uuid
 import structlog
 from datetime import datetime
 from ai_agents.agents.log_analyzer.log_analyzer import LogAnalyzerAgent
+from ai_agents.agents.ansible_dispatch.ansible_dispatch_agent import STATIC_RULE_MAP
 from ai_agents.agents.threat_intel.threat_intel_agent import ThreatIntelAgent
 from ai_agents.agents.vuln_scanner.cve_scanner import CVEScannerAgent
 from ai_agents.agents.incident_response.incident_responder import IncidentResponderAgent
@@ -30,6 +31,11 @@ class OrchestratorAgent:
     async def process_alert(self, alert: dict) -> dict:
         incident_id = str(uuid.uuid4())
         logger.info("orchestrator.processing", incident_id=incident_id, rule_id=alert.get("rule", {}).get("id"))
+        # Fast-path: skip ALL LLM agents for rules in STATIC_RULE_MAP
+        rule_id_str = str(alert.get("rule", {}).get("id", ""))
+        if rule_id_str in STATIC_RULE_MAP:
+            dispatch_result = await self.ansible_dispatch.execute({"alert": alert, "analysis": "static_map_fast_path", "alert_type": "known_threat", "severity": STATIC_RULE_MAP[rule_id_str].get("severity", "high"), "confidence": 0.95, "source_ip": ((alert.get("data") or {}).get("srcip") or (alert.get("data") or {}).get("src_ip") or (((alert.get("data") or {}).get("win") or {}).get("eventdata") or {}).get("ipAddress") or ""), "incident_id": incident_id})
+            return {"incident_id": incident_id, "dispatch": dispatch_result, "fast_path": True}
 
         # Step 1 — Log Analysis + Classification
         log_result = await self.log_analyzer.execute({"alert": alert, "incident_id": incident_id})
@@ -60,7 +66,7 @@ class OrchestratorAgent:
             "alert_type": log_result.get("alert_type", "other"),
             "severity": log_result.get("severity", "medium"),
             "confidence": log_result.get("confidence", 0.0),
-            "source_ip": alert.get("data", {}).get("srcip", ""),
+            "source_ip": ((alert.get("data") or {}).get("srcip") or (alert.get("data") or {}).get("src_ip") or (((alert.get("data") or {}).get("win") or {}).get("eventdata") or {}).get("ipAddress") or ""),
             "incident_id": incident_id,
         })
 

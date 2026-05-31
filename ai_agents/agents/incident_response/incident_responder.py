@@ -11,13 +11,8 @@ class IncidentResponderAgent(BaseAgent):
 
     def __init__(self):
         super().__init__()
-        s = get_settings()
-        lm = dspy.LM(
-            model=f"groq/{s.llm_model}",
-            api_key=s.groq_api_key,
-            temperature=s.llm_temperature,
-            max_tokens=s.llm_max_tokens,
-        )
+        from ai_agents.llm.fallback import get_lm
+        lm = get_lm(preferred="cerebras")
         dspy.configure(lm=lm)
         self._analyze = dspy.ChainOfThought(ThreatAnalysis)
 

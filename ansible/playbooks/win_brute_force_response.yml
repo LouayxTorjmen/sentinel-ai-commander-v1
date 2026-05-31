@@ -1,0 +1,30 @@
+---
+- name: SENTINEL-AI — Brute Force Response (Windows)
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: yes
+  become: false
+
+  pre_tasks:
+    - name: Validate source IP
+      ansible.builtin.fail:
+        msg: "source_ip is required for brute force response"
+      when: source_ip == ""
+
+  roles:
+    - role: win_collect_evidence
+      vars:
+        evidence_incident_id: "{{ incident_id }}"
+        evidence_target_ip: "{{ source_ip }}"
+
+    - role: win_block_ip
+      vars:
+        block_ip_address: "{{ source_ip }}"
+        block_ip_comment: "SENTINEL-AI: Brute force attack — incident {{ incident_id }}"
+        block_duration_seconds: 3600
+
+    - role: win_notify_soc
+      vars:
+        notify_subject: "Brute Force Attack Blocked (Windows)"
+        notify_severity: "{{ severity }}"
+        notify_incident_id: "{{ incident_id }}"
+        notify_message: "Source IP {{ source_ip }} blocked via Windows Firewall for 1 hour. Host: {{ ansible_hostname }}"

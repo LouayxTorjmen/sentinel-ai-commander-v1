@@ -116,6 +116,7 @@ services:
       - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_WAZUH_SYSLOG:-50050}:514/udp"
       # Manager API — localhost only (AI agents access via bridge network)
       - "127.0.0.1:${PORT_WAZUH_API:-50001}:55000"
+#      - "${LISTEN_ADDRESS:-0.0.0.0}:${PORT_WAZUH_SYSLOG_TCP:-50140}:5140/tcp"
     environment:
       - INDEXER_URL=https://wazuh.indexer:9200
       - INDEXER_USERNAME=${WAZUH_INDEXER_USER:-admin}
