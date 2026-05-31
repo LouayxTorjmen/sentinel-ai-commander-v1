@@ -77,7 +77,7 @@ $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
 # 8b) Fix dnsdist config syntax + restart on srv-dns-bind
 echo "[8b] Fixing dnsdist config and restarting..."
 $ANSIBLE $INV srv-dns-bind -m copy \
-  -a "src=$(pwd)/scripts/fix_dnsdist.py dest=/tmp/fix_dnsdist.py mode=0755" \
+  -a "src=/root/sentinel-ai-commander/scripts/fix_dnsdist.py dest=/tmp/fix_dnsdist.py mode=0755" \
   2>&1 | grep -E "CHANGED|FAILED" || true
 $ANSIBLE $INV srv-dns-bind -m shell --become \
   -a "python3 /tmp/fix_dnsdist.py && \
