@@ -176,7 +176,12 @@ def render_inventory(agents: list[dict]) -> str:
         os_type = classify_os(a)
 
         if status != "active":
-            unreachable.append((name, ip))
+            # Force-active agents in LINUX_OS_OVERRIDES regardless of Wazuh status
+            # (e.g. srv-dns-bind may show disconnected but is reachable via SSH)
+            if name in LINUX_OS_OVERRIDES:
+                linux_active.append((name, ip))
+            else:
+                unreachable.append((name, ip))
             continue
         if os_type == "linux":
             linux_active.append((name, ip))
@@ -187,15 +192,29 @@ def render_inventory(agents: list[dict]) -> str:
 
     # Per-host blocks - one section per OS family with proper connection vars
     lines.append("[linux_agents]")
+    # Agents that need password auth instead of key auth
+    LINUX_PASSWORD_AGENTS = set(os.getenv("LINUX_PASSWORD_AGENTS", "srv-dns-bind").split(",")) - {""}
+
     for name, ip in sorted(linux_active):
-        lines.append(
-            f"{name} ansible_host={ip} "
-            f"ansible_user={LINUX_USER_OVERRIDES.get(name, LINUX_USER)} "
-            + (f"ansible_become_password={LINUX_BECOME_PW} " if LINUX_BECOME_PW else "")
-            + f"ansible_ssh_private_key_file={SSH_KEY_PATH} "
-            f"ansible_connection=ssh "
-            f"ansible_python_interpreter=auto_silent"
-        )
+        if name in LINUX_PASSWORD_AGENTS:
+            lines.append(
+                f"{name} ansible_host={ip} "
+                f"ansible_user={LINUX_USER_OVERRIDES.get(name, LINUX_USER)} "
+                f"ansible_password={LINUX_BECOME_PW} "
+                + (f"ansible_become_password={LINUX_BECOME_PW} " if LINUX_BECOME_PW else "")
+                + f"ansible_ssh_common_args='-o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=no' "
+                f"ansible_connection=ssh "
+                f"ansible_python_interpreter=auto_silent"
+            )
+        else:
+            lines.append(
+                f"{name} ansible_host={ip} "
+                f"ansible_user={LINUX_USER_OVERRIDES.get(name, LINUX_USER)} "
+                + (f"ansible_become_password={LINUX_BECOME_PW} " if LINUX_BECOME_PW else "")
+                + f"ansible_ssh_private_key_file={SSH_KEY_PATH} "
+                f"ansible_connection=ssh "
+                f"ansible_python_interpreter=auto_silent"
+            )
     lines.append("")
 
     # Windows hosts: only ansible_host on the host line; everything else
