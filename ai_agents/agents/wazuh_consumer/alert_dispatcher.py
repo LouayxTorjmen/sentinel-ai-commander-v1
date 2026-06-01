@@ -46,6 +46,18 @@ HARD_SKIP_RULES = {
     # Windows NTLM logon — too noisy (Ansible WinRM generates constantly)
     # Lateral movement detected via custom rule 100620 instead
     92657,
+    # Windows Ansible/WinRM operational noise — zero SOC value
+    92213,   # Windows scheduled task created/modified (Ansible artifact)
+    62154,   # Windows service state change (Ansible WinRM side effect)
+    60010,   # Windows Event Log cleared (harmless in lab)
+    91809,   # PowerShell Base64 decode — Ansible uses this constantly
+    # Windows MSI / .NET compiler noise
+    60910,   # Windows Installer event
+    60911,   # Windows Installer completed
+    # Wazuh agent keepalive / inventory events — not threats
+    521,     # Wazuh agent started
+    502,     # Wazuh agent stopped
+    503,     # Wazuh agent disconnected
 }
 
 # FIM rules that need path-based filtering (real changes still pass)
@@ -83,11 +95,26 @@ _recent_dispatches: dict = {}
 
 
 def _is_fim_noise(alert: dict) -> bool:
-    """Return True if a FIM alert path matches a known noise pattern."""
+    """Return True if a FIM alert path matches a known noise pattern.
+
+    For Windows agents (srv-ad-dns, srv-ftp), we use an ALLOWLIST approach:
+    only dispatch if the path IS security-relevant. All other Windows FIM
+    is Ansible/WinRM churn and has zero SOC value.
+
+    For Linux agents we use the existing denylist (_FIM_NOISE_PATTERNS).
+    """
     syscheck = alert.get("syscheck") or alert.get("data", {}).get("syscheck") or {}
     path = (syscheck.get("path") or "").lower()
+    agent_name = (alert.get("agent") or {}).get("name", "")
     if not path:
         return False
+
+    # Windows agents: allowlist approach — noise unless path is critical
+    if agent_name in _FIM_WINDOWS_AGENTS:
+        is_critical = any(crit in path for crit in _FIM_WINDOWS_CRITICAL_PATHS)
+        return not is_critical  # noise=True if NOT critical
+
+    # Linux agents: denylist approach — noise if path matches noise pattern
     return any(pat in path for pat in _FIM_NOISE_PATTERNS)
 
 
@@ -110,12 +137,21 @@ def _should_dispatch(alert: dict, level: int) -> tuple[bool, str]:
         if rule_id in _FIM_RULES and _is_fim_noise(alert):
             return False, "fim_path_noise"
 
-    # Per (rule_id, agent_name) dedup
+    # Per (rule_id, agent_name) dedup — category-aware window
+    # FIM rules churn heavily; give them a 5-minute window
+    # Scan rules generate bursts; give them 2 minutes
+    # Everything else: default window (60s)
     import time
+    if rule_id in _FIM_RULES:
+        effective_window = max(DISPATCH_DEDUP_WINDOW_S, 300.0)  # 5 min for FIM
+    elif rule_id in {86601, 87702, 40503, 40116, 40117}:
+        effective_window = max(DISPATCH_DEDUP_WINDOW_S, 120.0)  # 2 min for scans
+    else:
+        effective_window = DISPATCH_DEDUP_WINDOW_S
     key = (rule_id, agent_name)
     now = time.monotonic()
     last = _recent_dispatches.get(key)
-    if last is not None and now - last < DISPATCH_DEDUP_WINDOW_S:
+    if last is not None and now - last < effective_window:
         return False, "dedup"
     _recent_dispatches[key] = now
 

@@ -1840,4 +1840,110 @@
     </mitre>
     <group>lateral_movement,windows,authentication,sentinel_response_required,</group>
   </rule>
+
+  <!-- ================================================================
+       Act 3 Detection Rules — AS-REP Roast, Kerberoast, NC Exfil,
+       SSH Lateral Movement from Attacker IP
+       ================================================================ -->
+
+  <!-- AS-REP Roasting: impacket-GetNPUsers generates Kerberos AS-REQ
+       with no pre-authentication for accounts that don't require it.
+       Suricata fires rule ET POLICY Kerberos AS-REQ (no pre-auth).
+       We detect it via the Suricata alert flowing through pfSense. -->
+  <rule id="100700" level="10">
+    <if_sid>86601</if_sid>
+    <match>Kerberos|kerberos|AS-REQ|ASREP|asrep</match>
+    <description>Act 3: AS-REP Roast attempt detected via Suricata</description>
+    <mitre>
+      <id>T1558.004</id>
+    </mitre>
+    <group>kerberos,attack,sentinel_response_required,</group>
+  </rule>
+
+  <rule id="100701" level="12" frequency="3" timeframe="30">
+    <if_matched_sid>100700</if_matched_sid>
+    <description>Act 3: AS-REP Roast CAMPAIGN — repeated Kerberos AS-REQ with no pre-auth</description>
+    <mitre>
+      <id>T1558.004</id>
+    </mitre>
+    <group>kerberos,attack,sentinel_response_required,</group>
+  </rule>
+
+  <!-- Kerberoasting: impacket-GetUserSPNs enumerates SPNs and requests
+       TGS tickets for service accounts. Detected via LDAP enumeration
+       of servicePrincipalName attributes on srv-ad-dns. -->
+  <rule id="100710" level="10">
+    <if_sid>60103</if_sid>
+    <field name="win.eventdata.serviceName">MSOL_|svc-mssql|svc-legacy|krbtgt</field>
+    <description>Act 3: Kerberoast — SPN service ticket requested for $(win.eventdata.serviceName)</description>
+    <mitre>
+      <id>T1558.003</id>
+    </mitre>
+    <group>kerberos,attack,sentinel_response_required,</group>
+  </rule>
+
+  <rule id="100711" level="14" frequency="5" timeframe="60">
+    <if_matched_sid>100710</if_matched_sid>
+    <description>Act 3: Kerberoast CAMPAIGN — bulk SPN ticket requests detected</description>
+    <mitre>
+      <id>T1558.003</id>
+    </mitre>
+    <group>kerberos,attack,sentinel_response_required,</group>
+  </rule>
+
+  <!-- SSH Lateral Movement: successful SSH login from the attacker
+       VLAN (10.70.0.0/24) to any DMZ host. Rule 5715 (SSH success)
+       is already captured; we add a child rule that fires ONLY for
+       external-origin SSH, filtering out Ansible management traffic
+       from 10.60.0.0/24. -->
+  <rule id="100720" level="12">
+    <if_sid>5715</if_sid>
+    <srcip>10.70.0.0/24</srcip>
+    <description>Act 3: SSH Lateral Movement — successful SSH login from attacker VLAN $(srcip)</description>
+    <mitre>
+      <id>T1021.004</id>
+    </mitre>
+    <group>ssh,lateral_movement,attack,sentinel_response_required,</group>
+  </rule>
+
+  <!-- Raw TCP Exfiltration (nc): Suricata detects outbound raw TCP
+       from srv-web to the Kali listener (port 9999). This fires as
+       an ET POLICY rule (raw TCP to non-standard port). -->
+  <rule id="100730" level="12">
+    <if_sid>86601</if_sid>
+    <match>POLICY|policy|ET POLICY</match>
+    <field name="data.dest_ip">10.70.0.10</field>
+    <description>Act 3: Raw TCP exfiltration to attacker host $(data.dest_ip):$(data.dest_port)</description>
+    <mitre>
+      <id>T1041</id>
+    </mitre>
+    <group>exfiltration,attack,sentinel_response_required,</group>
+  </rule>
+
+  <!-- Data staging detection: large data transfer from srv-web to Kali.
+       Complements the nc exfil rule — fires on any Suricata alert
+       indicating data leaving the DMZ to the attacker VLAN. -->
+  <rule id="100731" level="14">
+    <if_sid>100730</if_sid>
+    <description>Act 3: Data exfiltration CONFIRMED — staging bundle transferred to $(data.dest_ip)</description>
+    <mitre>
+      <id>T1041</id>
+      <id>T1074.001</id>
+    </mitre>
+    <group>exfiltration,attack,sentinel_response_required,</group>
+  </rule>
+
+  <!-- Symbolic Ransom Note: FIM detects new file in /tmp/ with name
+       matching RANSOM or SENTINEL_RANSOM — created by the webshell
+       in Act 3 Step 8. -->
+  <rule id="100740" level="12">
+    <if_sid>554</if_sid>
+    <field name="syscheck.path">RANSOM|ransom</field>
+    <description>Act 3: Symbolic ransom note detected at $(syscheck.path)</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+    <group>fim,ransomware,attack,sentinel_response_required,</group>
+  </rule>
+
 </group>

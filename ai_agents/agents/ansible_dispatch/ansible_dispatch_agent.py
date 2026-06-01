@@ -111,6 +111,77 @@ STATIC_RULE_MAP = {
     # PowerShell suspicious execution on DC
     "92057": {"playbook": "win_incident_response", "severity": "critical"},
 
+    # ── SSH Brute Force (extended) ──────────────────────────────────
+    "5503": {"playbook": "brute_force_response", "severity": "high"},    # SSH max auth attempts exceeded
+    "5551": {"playbook": "brute_force_response", "severity": "high"},    # SSH brute force (new variant)
+    "5763": {"playbook": "brute_force_response", "severity": "high"},    # SSH scanner detected
+    "2502": {"playbook": "brute_force_response", "severity": "medium"},  # FTP brute force
+    "2503": {"playbook": "brute_force_response", "severity": "medium"},  # FTP auth failure frequency
+    "11325": {"playbook": "brute_force_response", "severity": "high"},   # MySQL brute force
+    "30304": {"playbook": "brute_force_response", "severity": "high"},   # Web brute force (DVWA)
+
+    # ── Web Application Attacks ─────────────────────────────────────
+    "31103": {"playbook": "incident_response", "severity": "high"},      # SQL injection attempt
+    "31104": {"playbook": "incident_response", "severity": "high"},      # XSS attack
+    "31108": {"playbook": "incident_response", "severity": "high"},      # Command injection
+    "31151": {"playbook": "incident_response", "severity": "high"},      # PHP remote include
+    "31516": {"playbook": "incident_response", "severity": "medium"},    # Directory traversal
+    "31530": {"playbook": "incident_response", "severity": "critical"},  # Web shell upload
+    "31531": {"playbook": "incident_response", "severity": "critical"},  # Web shell execution
+    "77101": {"playbook": "incident_response", "severity": "critical"},  # Shellshock / bash injection
+
+    # ── Privilege Escalation ────────────────────────────────────────
+    "5402": {"playbook": "compromised_user_response", "severity": "high"},    # sudo -s (root shell obtained)
+    "5403": {"playbook": "compromised_user_response", "severity": "high"},    # sudo to root
+    "5404": {"playbook": "compromised_user_response", "severity": "critical"},# sudo fail then success
+    "40111": {"playbook": "compromised_user_response", "severity": "critical"},# Privilege escalation
+
+    # ── Malware / Rootkit (Wazuh built-in) ─────────────────────────
+    "510": {"playbook": "malware_containment", "severity": "critical"},  # Rootkit hidden file
+    "511": {"playbook": "malware_containment", "severity": "critical"},  # Rootkit hidden process
+    "533": {"playbook": "malware_containment", "severity": "critical"},  # Worm detected
+    "9502": {"playbook": "malware_containment", "severity": "critical"}, # ClamAV: virus found
+    "9503": {"playbook": "malware_containment", "severity": "critical"}, # ClamAV: virus moved
+
+    # ── Act 3: AS-REP Roast / Kerberoast (custom rules 100700+) ────
+    "100700": {"playbook": "incident_response", "severity": "high"},     # AS-REP roast attempt
+    "100701": {"playbook": "incident_response", "severity": "critical"}, # AS-REP roast frequency
+    "100710": {"playbook": "incident_response", "severity": "high"},     # Kerberoast SPN enumeration
+    "100711": {"playbook": "incident_response", "severity": "critical"}, # Kerberoast TGS-REQ spike
+
+    # ── Act 3: SSH Lateral Movement ─────────────────────────────────
+    "5715": {"playbook": "block_ip", "severity": "high"},                # SSH login from Kali IP
+    "100720": {"playbook": "block_ip", "severity": "critical"},          # SSH lateral from attacker
+
+    # ── Act 3: Raw TCP / NC Exfiltration ────────────────────────────
+    "100730": {"playbook": "block_ip", "severity": "critical"},          # Raw TCP exfil to external
+    "100731": {"playbook": "block_dns_exfil", "severity": "critical"},   # Data staging detected
+
+    # ── Windows-specific Attacks ────────────────────────────────────
+    "60106": {"playbook": "win_incident_response", "severity": "high"},        # Account lockout
+    "60122": {"playbook": "win_incident_response", "severity": "high"},        # Failed logon frequency
+    "91545": {"playbook": "win_incident_response", "severity": "critical"},    # Mimikatz detected
+    "91556": {"playbook": "win_incident_response", "severity": "critical"},    # Rubeus/Kerberoast tool
+    "92200": {"playbook": "win_incident_response", "severity": "critical"},    # LSASS access non-system
+    "92656": {"playbook": "win_lateral_movement_response", "severity": "critical"}, # Pass-the-Hash
+
+    # ── Network-level Suricata (extended) ───────────────────────────
+    "40116": {"playbook": "block_ip", "severity": "medium"},  # ET SCAN: Nessus scan
+    "40117": {"playbook": "block_ip", "severity": "medium"},  # ET SCAN: OpenVAS scan
+    "86001": {"playbook": "block_ip", "severity": "high"},    # Suricata: SSH brute force
+    "86002": {"playbook": "block_ip", "severity": "high"},    # Suricata: FTP brute force
+
+    # ── DoH Exfil (full chain) ──────────────────────────────────────
+    "100420": {"playbook": "block_dns_exfil", "severity": "high"},     # DoH exfil stage 2
+    "100421": {"playbook": "block_dns_exfil", "severity": "high"},     # DoH exfil stage 3
+    "100423": {"playbook": "block_dns_exfil", "severity": "critical"}, # DoH exfil confirmed
+
+    # ── Persistence (extended) ──────────────────────────────────────
+    "553": {"playbook": "fim_restore_response", "severity": "high"},   # File deleted from monitored dir
+    "100740": {"playbook": "incident_response", "severity": "critical"}, # Ransom note dropped via webshell
+    "100301": {"playbook": "fim_restore_response", "severity": "critical"}, # SSH authorized_keys modified
+    "100302": {"playbook": "fim_restore_response", "severity": "high"},     # Crontab modified
+
     # ─── Windows security log tampering / lateral movement ────────────
     "18152": {"playbook": "win_incident_response", "severity": "critical"},
     "60103": {"playbook": "win_lateral_movement_response", "severity": "high"},

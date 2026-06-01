@@ -76,12 +76,69 @@ def run_playbook():
         if tags:
             runner_args["tags"] = ",".join(tags)
         result = ansible_runner.run(**runner_args)
+        # Extract per-task outcomes for visibility
+        task_outcomes = []
+        changed_tasks = []
+        failed_tasks = []
+        try:
+            for event in result.events:
+                ev_data = event.get("event_data", {})
+                task_name = ev_data.get("task", "")
+                task_action = ev_data.get("task_action", "")
+                event_type = event.get("event", "")
+                res = ev_data.get("res", {})
+
+                if event_type == "runner_on_ok" and ev_data.get("changed"):
+                    detail = {
+                        "task": task_name,
+                        "host": ev_data.get("host", ""),
+                        "changed": True,
+                    }
+                    # Extract meaningful outcome details per task type
+                    if "block" in task_name.lower() or "iptables" in task_name.lower():
+                        detail["outcome"] = f"IP block applied: {res.get('cmd', '')[:120]}"
+                    elif "remove" in task_name.lower() or "delete" in task_name.lower():
+                        detail["outcome"] = f"Removed: {res.get('stdout', res.get('cmd', ''))[:120]}"
+                    elif "revoke" in task_name.lower() or "privilege" in task_name.lower():
+                        detail["outcome"] = f"Privileges revoked: {res.get('stdout', '')[:120]}"
+                    elif "firewall" in task_name.lower() or "New-NetFirewall" in str(res):
+                        detail["outcome"] = f"Firewall rule created: {res.get('stdout', '')[:120]}"
+                    elif "certutil" in task_name.lower() or "revoke" in task_name.lower():
+                        detail["outcome"] = f"Certificate action: {res.get('stdout', '')[:120]}"
+                    elif "kill" in task_name.lower() or "connection" in task_name.lower():
+                        detail["outcome"] = f"Connection killed: {res.get('stdout', '')[:80]}"
+                    elif "copy" in task_action or "template" in task_action:
+                        detail["outcome"] = f"File written: {ev_data.get('task_path', '')}"
+                    elif "shell" in task_action or "command" in task_action:
+                        stdout = res.get("stdout", "")[:200]
+                        if stdout:
+                            detail["outcome"] = f"Output: {stdout}"
+                    changed_tasks.append(detail)
+                    task_outcomes.append(detail)
+
+                elif event_type == "runner_on_failed":
+                    failed_tasks.append({
+                        "task": task_name,
+                        "host": ev_data.get("host", ""),
+                        "error": str(res.get("msg", res.get("stderr", "")))[:200],
+                        "ignore_errors": ev_data.get("ignore_errors", False),
+                    })
+        except Exception as e:
+            logger.warning(f"Could not parse task events: {e}")
+
         response = {
             "playbook": playbook,
             "status": result.status,
             "rc": result.rc,
             "stats": result.stats,
             "timestamp": datetime.utcnow().isoformat(),
+            "changed_tasks": changed_tasks,
+            "failed_tasks": [t for t in failed_tasks if not t["ignore_errors"]],
+            "summary": {
+                "changed": len(changed_tasks),
+                "failed": len([t for t in failed_tasks if not t["ignore_errors"]]),
+                "outcomes": [t.get("outcome", t["task"]) for t in changed_tasks if t.get("outcome")],
+            },
         }
         return jsonify(response), 200 if result.rc == 0 else 500
     except Exception as e:
