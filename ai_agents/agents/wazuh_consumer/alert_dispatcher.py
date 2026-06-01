@@ -58,6 +58,9 @@ HARD_SKIP_RULES = {
     521,     # Wazuh agent started
     502,     # Wazuh agent stopped
     503,     # Wazuh agent disconnected
+    92103,   # LDAP from PowerShell (Ansible WinRM LDAP queries — constant noise)
+    61102,   # Windows logon/logoff session (Ansible WinRM session events)
+    60602,   # Windows account logon (normal auth events from management)
 }
 
 # FIM rules that need path-based filtering (real changes still pass)
