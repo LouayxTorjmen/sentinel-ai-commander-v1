@@ -111,6 +111,25 @@ _FIM_NOISE_PATTERNS = (
 _recent_dispatches: dict = {}
 
 
+
+# Windows agents use an allowlist approach for FIM — only critical paths dispatch
+_FIM_WINDOWS_AGENTS = {"srv-ad-dns", "srv-ftp"}
+_FIM_WINDOWS_CRITICAL_PATHS = (
+    # System binaries — modification = rootkit/tamper
+    "\\system32\\", "\\syswow64\\",
+    "\\windows\\system32\\drivers\\",
+    # Startup persistence
+    "\\currentversion\\run", "\\currentversion\\runonce",
+    "\\windows\\startup\\",
+    # Scheduled tasks
+    "\\system32\\tasks\\", "\\syswow64\\tasks\\",
+    # Hosts file tampering
+    "\\system32\\drivers\\etc\\hosts",
+    # Credential stores
+    "\\system32\\config\\sam", "\\system32\\config\\system",
+    # Our monitored sentinel paths
+    "c:\\sentinel", "\\tasks\\sentinel",
+)
 def _is_fim_noise(alert: dict) -> bool:
     """Return True if a FIM alert path matches a known noise pattern.
 
