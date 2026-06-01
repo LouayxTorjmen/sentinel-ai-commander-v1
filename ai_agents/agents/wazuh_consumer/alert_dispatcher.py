@@ -80,6 +80,23 @@ _FIM_NOISE_PATTERNS = (
     "/var/lib/dnf/", "/var/lib/apt/", "/var/lib/rpm/",
     # systemd transient drop-ins
     "/run/systemd/",
+    # Wazuh agent self-monitoring
+    "/var/ossec/queue/", "/var/ossec/logs/", "/var/ossec/tmp/",
+    # Log rotation artifacts
+    "/var/log/journal/", ".log.1", ".gz.tmp", ".log.gz",
+    # Python / pip installs triggered by Ansible
+    "/lib/python", "/site-packages/", "/__pycache__/",
+    # SSH known_hosts churned by scan/connect activity
+    "/.ssh/known_hosts",
+    # Windows WinRM temp paths (forwarded lowercase by Wazuh)
+    "\\\\appdata\\\\local\\\\temp\\\\", "/appdata/local/temp/",
+    "\\\\windows\\\\temp\\\\", "/windows/temp/",
+    "\\\\users\\\\admini",
+    "\\\\programdata\\\\microsoft\\\\windows\\\\wer\\\\",
+    "\\\\windows\\\\prefetch\\\\",
+    "\\\\windows\\\\system32\\\\winevt\\\\logs\\\\",
+    "\\\\wazuh-agent\\\\", "ossec-agent",
+    "\\\\tmp\\\\ansible-tmp-",
     # Windows: C# compiler (csc.exe) temp artifacts spawned by Ansible/WinRM
     # itself under AppData\Local\Temp — prevents a FIM self-noise feedback loop
     # (win playbook runs -> csc.exe writes temp -> FIM fires -> playbook runs...)
