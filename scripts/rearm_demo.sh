@@ -82,6 +82,53 @@ $ANSIBLE $INV srv-dns-bind -m shell --become \
 $ANSIBLE $INV srv-dns-bind -m shell --become \
   2>&1 | grep -E "CHANGED|FAILED|active|failed|fixed"
 
+# 10) Re-arm Act 3 scenario state — AD accounts for AS-REP roast + Kerberoast
+echo "[10] Re-arming Act 3 AD scenario accounts..."
+$ANSIBLE $INV srv-ad-dns -m win_shell --become \
+  -a 'Import-Module ActiveDirectory
+# svc-legacy: no pre-auth required (AS-REP Roastable)
+try {
+  $u = Get-ADUser -Identity "svc-legacy" -ErrorAction Stop
+  Set-ADAccountControl -Identity "svc-legacy" -DoesNotRequirePreAuth $true
+  Enable-ADAccount -Identity "svc-legacy"
+  Set-ADAccountPassword -Identity "svc-legacy" -NewPassword (ConvertTo-SecureString "Summer2024!" -AsPlainText -Force) -Reset
+  Write-Host "svc-legacy: updated"
+} catch {
+  New-ADUser -Name "svc-legacy" -SamAccountName "svc-legacy" `
+    -AccountPassword (ConvertTo-SecureString "Summer2024!" -AsPlainText -Force) `
+    -Enabled $true -PasswordNeverExpires $true
+  Set-ADAccountControl -Identity "svc-legacy" -DoesNotRequirePreAuth $true
+  Write-Host "svc-legacy: created"
+}
+# svc-mssql: SPN registered (Kerberoastable)
+try {
+  $u = Get-ADUser -Identity "svc-mssql" -ErrorAction Stop
+  Enable-ADAccount -Identity "svc-mssql"
+  Set-ADAccountPassword -Identity "svc-mssql" -NewPassword (ConvertTo-SecureString "MssqlP@ss2024!" -AsPlainText -Force) -Reset
+  Write-Host "svc-mssql: updated"
+} catch {
+  New-ADUser -Name "svc-mssql" -SamAccountName "svc-mssql" `
+    -AccountPassword (ConvertTo-SecureString "MssqlP@ss2024!" -AsPlainText -Force) `
+    -Enabled $true -PasswordNeverExpires $true
+  Write-Host "svc-mssql: created"
+}
+# Register SPN for svc-mssql (makes it Kerberoastable)
+$spns = (Get-ADUser -Identity "svc-mssql" -Properties ServicePrincipalNames).ServicePrincipalNames
+if ($spns -notcontains "MSSQLSvc/srv-sql.mydomain.com:1433") {
+  Set-ADUser -Identity "svc-mssql" -ServicePrincipalNames @{Add="MSSQLSvc/srv-sql.mydomain.com:1433"}
+  Write-Host "svc-mssql: SPN registered"
+} else { Write-Host "svc-mssql: SPN already set" }
+echo "Act3 AD accounts OK"' \
+  2>&1 | grep -E "CHANGED|FAILED|created|updated|SPN|OK|Error"
+
+# 11) Clean up Act 3 artifacts from previous runs on srv-web
+echo "[11] Cleaning Act 3 artifacts from srv-web..."
+$ANSIBLE $INV Ubuntu-agent-web -m shell --become \
+  -a 'rm -f /tmp/SENTINEL_RANSOM_NOTE.txt /tmp/exfil_bundle.tar.gz
+      rm -f /tmp/sentinel_procs_*.txt /tmp/sentinel_netstat_*.txt /tmp/sentinel_auth_*.txt
+      echo "cleaned"' \
+  2>&1 | grep -E "CHANGED|cleaned"
+
 # 9b) Wait for dispatcher dedup window to expire
 echo "[9b] Waiting 65s for dispatcher dedup window to expire..."
 sleep 65
