@@ -202,6 +202,7 @@
               ssl_protocols       TLSv1 TLSv1.1 TLSv1.2;
               ssl_ciphers         "DEFAULT:@SECLEVEL=0";
               ssl_prefer_server_ciphers off;
+              access_log /var/log/nginx/sentinel-tls-access.log sentinel_tls;
               # -----------------------
 
               root  {{ web_root }};

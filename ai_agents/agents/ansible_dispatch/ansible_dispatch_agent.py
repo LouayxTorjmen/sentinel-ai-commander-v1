@@ -108,6 +108,8 @@ STATIC_RULE_MAP = {
     "100620": {"playbook": "win_lateral_movement_response", "severity": "critical"},
     # Falco: webshell/suspicious process on Linux (shadow read, sensitive file access)
     "100112": {"playbook": "incident_response", "severity": "high"},     # Falco: SSH key search
+    "100601": {"playbook": "harden_nginx_tls", "severity": "high"},      # Weak TLS cipher detected
+    "100602": {"playbook": "harden_nginx_tls", "severity": "critical"},  # Repeated weak TLS
     "100114": {"playbook": "incident_response", "severity": "high"},
     # PowerShell suspicious execution on DC
     "92057": {"playbook": "win_incident_response", "severity": "critical"},
