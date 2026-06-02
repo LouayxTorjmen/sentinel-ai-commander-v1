@@ -109,6 +109,10 @@ _FIM_NOISE_PATTERNS = (
     "/tmp/", "/var/tmp/", "/dev/shm/",
     # apt/dpkg temp files
     "apt-key-gpghome", ".dpkg-", ".apt-",
+    # webshell uploads dir — deleted by rearm, not an attack
+    "/dvwa/hackable/uploads/",
+    # dnsdist sed temp files
+    "dnsdist/sed", "dnsdist/tmp",
     # sed/awk temp files
     "/etc/dnsdist/sed", "/etc/dnsdist/tmp",
     # Windows: C# compiler (csc.exe) temp artifacts spawned by Ansible/WinRM
