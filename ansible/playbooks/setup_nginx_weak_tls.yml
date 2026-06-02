@@ -190,6 +190,8 @@
         dest: "{{ vhost_path }}"
         mode: "0644"
         content: |
+              log_format sentinel_tls 'SENTINEL_TLS $remote_addr proto=$ssl_protocol cipher=$ssl_cipher status=$status';
+
           # SENTINEL-AI weak-TLS scenario vhost — DELIBERATELY INSECURE
           server {
               listen 443 ssl;
