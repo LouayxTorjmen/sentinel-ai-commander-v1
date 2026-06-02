@@ -91,12 +91,9 @@ $SSH_DNS \
    echo doh_iptables_restored" 2>/dev/null \
   | grep -E "restored|failed" || true
 
-# 8b-dnsdist) Fix dnsdist config syntax + restart on srv-dns-bind
+# 8b-dnsdist) Clean dnsdist NMG block entries + restart
 echo "[8b] Fixing dnsdist config and restarting..."
-$ANSIBLE $INV srv-dns-bind -m shell --become \
-  -a 'sed -i "s/addAction(NetmaskGroupRule(newNMG():addMask(\(.*\)), DropAction())/local _nmg = newNMG(); _nmg:addMask(\1); addAction(NetmaskGroupRule(_nmg), DropAction())/g" /etc/dnsdist/dnsdist.conf && cp /etc/dnsdist/dnsdist.conf /var/lib/sentinel-ai/baselines/_etc_dnsdist_dnsdist.conf.baseline && systemctl restart dnsdist && systemctl is-active dnsdist || echo failed' \
-  2>&1 | grep -E "CHANGED|FAILED|active|failed|fixed"
-
+$SSH_DNS "sudo python3 /usr/local/bin/fix_dnsdist_clean.py && sudo systemctl restart dnsdist && sudo systemctl is-active dnsdist || echo failed" 2>/dev/null | grep -E "fixed|active|failed" || true
 # 10) Re-arm Act 3 scenario state — AD accounts for AS-REP roast + Kerberoast
 # 10) Re-arm Act 3 scenario state
 echo "[10] Re-arming Act 3 AD scenario accounts..."
