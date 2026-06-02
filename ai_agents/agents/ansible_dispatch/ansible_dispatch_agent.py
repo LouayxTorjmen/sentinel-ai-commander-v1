@@ -144,10 +144,10 @@ STATIC_RULE_MAP = {
     "9503": {"playbook": "malware_containment", "severity": "critical"}, # ClamAV: virus moved
 
     # ── Act 3: AS-REP Roast / Kerberoast (custom rules 100700+) ────
-    "100700": {"playbook": "incident_response", "severity": "high"},     # AS-REP roast attempt
-    "100701": {"playbook": "incident_response", "severity": "critical"}, # AS-REP roast frequency
-    "100710": {"playbook": "incident_response", "severity": "high"},     # Kerberoast SPN enumeration
-    "100711": {"playbook": "incident_response", "severity": "critical"}, # Kerberoast TGS-REQ spike
+    "100700": {"playbook": "win_incident_response", "severity": "high"},     # AS-REP roast attempt
+    "100701": {"playbook": "win_incident_response", "severity": "critical"}, # AS-REP roast frequency
+    "100710": {"playbook": "win_incident_response", "severity": "high"},     # Kerberoast SPN enumeration
+    "100711": {"playbook": "win_incident_response", "severity": "critical"}, # Kerberoast TGS-REQ spike
 
     # ── Act 3: SSH Lateral Movement ─────────────────────────────────
     "5715": {"playbook": "block_ip", "severity": "high"},                # SSH login from Kali IP
@@ -551,6 +551,12 @@ class HybridAnsibleDispatcher(BaseAgent):
         # Reroute pfSense block_ip to a Linux host (pfSense is FreeBSD/unknown)
         if decision.get("playbook") == "block_ip" and "sentinel-fw" in agent_name:
             agent_name = "Ubuntu-agent-web"
+
+        # Kerberos alerts from pfSense/Suricata — redirect to srv-ad-dns (Windows DC)
+        if rule_id in {"100700", "100701", "100710", "100711"} and            ("sentinel-fw" in agent_name or "pfSense" in agent_name or
+            os_of_agent(agent_name) != "windows"):
+            agent_name = "srv-ad-dns"
+            extra_vars["target_hosts"] = "srv-ad-dns"
         target_os = os_of_agent(agent_name)
         if target_os is None:
             self.logger.info(
