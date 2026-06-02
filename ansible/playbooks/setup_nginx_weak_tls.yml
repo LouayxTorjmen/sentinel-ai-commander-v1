@@ -209,7 +209,7 @@
 
               root  {{ web_root }};
               index index.html;
-          }
+              }
 
     - name: Enable the weak vhost
       ansible.builtin.file:
