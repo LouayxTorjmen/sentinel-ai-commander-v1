@@ -54,6 +54,8 @@ HARD_SKIP_RULES = {
     # Windows MSI / .NET compiler noise
     60910,   # Windows Installer event
     60911,   # Windows Installer completed
+    92057,   # PowerShell on DC — constant Ansible WinRM noise
+    60702,   # VSS service timeout — Windows background noise
     # Wazuh agent keepalive / inventory events — not threats
     521,     # Wazuh agent started
     502,     # Wazuh agent stopped

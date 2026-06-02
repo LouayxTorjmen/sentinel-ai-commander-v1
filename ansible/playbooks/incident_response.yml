@@ -2,22 +2,11 @@
 - name: SENTINEL-AI — Generic Incident Response
   hosts: "{{ target_hosts | default('all') }}"
   gather_facts: yes
-
   roles:
     - role: collect_evidence
       vars:
         evidence_incident_id: "{{ incident_id }}"
         evidence_target_ip: "{{ source_ip }}"
-
-    - role: block_ip
-      vars:
-        block_ip_address: "{{ source_ip }}"
-        block_ip_comment: "SENTINEL-AI: Generic incident response — {{ incident_id }}"
-        block_duration_seconds: 1800
-      when:
-        - source_ip != ""
-        - block_attacker | default(true) | bool
-
     - role: notify_soc
       vars:
         notify_subject: "Incident Response Executed"
