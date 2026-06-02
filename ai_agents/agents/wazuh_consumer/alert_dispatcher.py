@@ -56,6 +56,10 @@ HARD_SKIP_RULES = {
     60911,   # Windows Installer completed
     92057,   # PowerShell on DC — constant Ansible WinRM noise
     60702,   # VSS service timeout — Windows background noise
+    92201,   # PowerShell script block — Ansible WinRM noise
+    92654,   # WMI System Info Discovery — Ansible/Windows noise
+    61109,   # DNS resolution timeout — Windows noise
+    61110,   # DNS resolution timeout variant
     # Wazuh agent keepalive / inventory events — not threats
     521,     # Wazuh agent started
     502,     # Wazuh agent stopped
