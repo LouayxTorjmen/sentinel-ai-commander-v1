@@ -1,0 +1,9 @@
+ansible_user: louay
+ansible_password: "Louay2002"
+ansible_become: true
+ansible_become_method: sudo
+ansible_become_password: "Louay2002"
+ansible_connection: ssh
+ansible_python_interpreter: auto_silent
+ansible_ssh_common_args: '-o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=no -o IdentitiesOnly=yes'
+ansible_ssh_private_key_file: ~

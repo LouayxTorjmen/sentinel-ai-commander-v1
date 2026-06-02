@@ -9,6 +9,25 @@
     <group>ids,suricata,</group>
   </rule>
 
+  <!-- DoH exfil detection — matches SENTINEL_AI_DOH formatted log -->
+  <rule id="100750" level="12">
+    <match>SENTINEL_AI_DOH</match>
+    <description>DoH DNS Exfiltration: HTTPS connection to DoH server detected</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>doh,exfiltration,attack,sentinel_response_required,</group>
+  </rule>
+
+  <rule id="100751" level="14" frequency="4" timeframe="30">
+    <if_matched_sid>100750</if_matched_sid>
+    <description>DoH DNS Exfiltration CAMPAIGN: repeated connections to DoH server</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>doh,exfiltration,attack,sentinel_response_required,</group>
+  </rule>
+
   <rule id="100002" level="8">
     <if_sid>100001</if_sid>
     <field name="alert.severity">1</field>

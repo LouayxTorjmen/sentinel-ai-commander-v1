@@ -175,6 +175,8 @@ STATIC_RULE_MAP = {
     "100420": {"playbook": "block_dns_exfil", "severity": "high"},     # DoH exfil stage 2
     "100421": {"playbook": "block_dns_exfil", "severity": "high"},     # DoH exfil stage 3
     "100423": {"playbook": "block_dns_exfil", "severity": "critical"}, # DoH exfil confirmed
+    "100750": {"playbook": "block_dns_exfil", "severity": "high"},    # DoH iptables LOG detection
+    "100751": {"playbook": "block_dns_exfil", "severity": "critical"}, # DoH exfil campaign
 
     # ── Persistence (extended) ──────────────────────────────────────
     "553": {"playbook": "fim_restore_response", "severity": "high"},   # File deleted from monitored dir
@@ -417,8 +419,18 @@ def extract_vars_from_alert(alert: dict) -> dict:
     adcs_requester = win_eventdata.get("requester", "") or ""
     adcs_request_id = win_eventdata.get("requestId", "") or win_eventdata.get("requestid", "") or ""
 
+    # For SENTINEL_AI_DOH alerts, source IP is in full_log as "src=10.x.x.x"
+    import re as _re
+    full_log = alert.get("full_log", "")
+    doh_src = ""
+    if "SENTINEL_AI_DOH" in full_log or "SENTINEL_DOH" in full_log:
+        m = _re.search(r"src=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", full_log)
+        if m:
+            doh_src = m.group(1)
+
     return {
-        "source_ip":      (data.get("srcip") or data.get("src_ip") or
+        "source_ip":      (doh_src or
+                          data.get("srcip") or data.get("src_ip") or
                           win_eventdata.get("ipAddress") or
                           win_eventdata.get("ipaddress", "")),
         "dest_ip":        data.get("dstip") or data.get("dest_ip", ""),
