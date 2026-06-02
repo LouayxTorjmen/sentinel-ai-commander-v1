@@ -84,6 +84,7 @@ $SSH_DNS \
    sudo iptables -I INPUT -p tcp --dport 443 --syn -j SENTINEL_DOH; \
    sudo iptables -A SENTINEL_DOH -j LOG --log-prefix 'SENTINEL_DOH_EXFIL ' --log-level 4; \
    sudo iptables -A SENTINEL_DOH -j RETURN; \
+   sudo iptables -F SENTINEL_BLOCK 2>/dev/null; \
    sudo truncate -s 0 /var/log/sentinel-doh-alert.log 2>/dev/null; \
    sudo truncate -s 0 /var/log/sentinel-doh-exfil.log 2>/dev/null; \
    sudo systemctl restart sentinel-doh-formatter 2>/dev/null; \

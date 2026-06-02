@@ -100,6 +100,9 @@ _FIM_NOISE_PATTERNS = (
     "\\\\windows\\\\system32\\\\winevt\\\\logs\\\\",
     "\\\\wazuh-agent\\\\", "ossec-agent",
     "\\\\tmp\\\\ansible-tmp-",
+    # iptables save files — modified by block_ip playbook, not attacks
+    "/etc/sysconfig/iptables", "/etc/iptables/rules",
+    "/var/lib/sentinel-ai/", "/run/xtables.lock",
     # Windows: C# compiler (csc.exe) temp artifacts spawned by Ansible/WinRM
     # itself under AppData\Local\Temp — prevents a FIM self-noise feedback loop
     # (win playbook runs -> csc.exe writes temp -> FIM fires -> playbook runs...)

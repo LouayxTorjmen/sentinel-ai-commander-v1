@@ -181,6 +181,10 @@ STATIC_RULE_MAP = {
     # ── Persistence (extended) ──────────────────────────────────────
     "553": {"playbook": "fim_restore_response", "severity": "high"},   # File deleted from monitored dir
     "100740": {"playbook": "incident_response", "severity": "critical"}, # Ransom note dropped via webshell
+    # Web attack rules missing from map
+    "100115": {"playbook": "incident_response", "severity": "high"},  # Falco: file open by web process
+    "100150": {"playbook": "incident_response", "severity": "high"},  # Web shell activity
+    "100130": {"playbook": "block_ip", "severity": "high"},           # Suricata: ET SCAN/POLICY alert
     "100301": {"playbook": "fim_restore_response", "severity": "critical"}, # SSH authorized_keys modified
     "100302": {"playbook": "fim_restore_response", "severity": "high"},     # Crontab modified
 
