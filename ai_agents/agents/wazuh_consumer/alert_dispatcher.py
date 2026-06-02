@@ -274,9 +274,21 @@ async def dispatch_alerts(orchestrator) -> None:
 
             try:
                 result = await orchestrator.process_alert(alert)
+                _rule   = alert.get("rule") or {}
+                _data   = alert.get("data") or {}
+                _syscheck = alert.get("syscheck") or {}
+                _winev  = (_data.get("win") or {}).get("eventdata") or {}
+                _ctx    = (
+                    _syscheck.get("path") or
+                    _data.get("srcip") or _data.get("src_ip") or
+                    _winev.get("ipAddress") or
+                    _data.get("dstip") or ""
+                )
                 logger.info(
                     "alert_dispatcher.processed",
-                    rule_id=(alert.get("rule") or {}).get("id"),
+                    rule_id=_rule.get("id"),
+                    rule_desc=(_rule.get("description") or "")[:80],
+                    context=_ctx,
                     level=level,
                     incident_id=result.get("incident_id"),
                     severity=result.get("severity"),
