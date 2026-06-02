@@ -5,6 +5,7 @@ set -e
 echo "=== SENTINEL-AI Demo Re-Arm ==="
 
 ANSIBLE="docker exec sentinel-ansible-runner ansible"
+SSH_DNS="sshpass -p Louay2002 ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no louay@10.50.0.11"
 PLAYBOOK="docker exec sentinel-ansible-runner ansible-playbook"
 INV="-i /ansible/inventory/hosts.ini"
 
@@ -76,7 +77,7 @@ $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
 
 # 8b) Fix dnsdist config syntax + restore iptables DOH logging + restart
 echo "[8b] Fixing dnsdist config, restoring iptables DOH rule, restarting..."
-ssh -o StrictHostKeyChecking=no louay@10.50.0.11 \
+$SSH_DNS \
   "sudo iptables -F SENTINEL_BLOCK 2>/dev/null; \
    sudo iptables -N SENTINEL_DOH 2>/dev/null || sudo iptables -F SENTINEL_DOH; \
    sudo iptables -D INPUT -p tcp --dport 443 --syn -j SENTINEL_DOH 2>/dev/null || true; \
