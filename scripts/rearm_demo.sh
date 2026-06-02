@@ -74,7 +74,22 @@ $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   2>&1 | grep -E "CHANGED|FAILED|reset|skipped"
 
 
-# 8b) Fix dnsdist config syntax + restart on srv-dns-bind
+# 8b) Fix dnsdist config syntax + restore iptables DOH logging + restart
+echo "[8b] Fixing dnsdist config, restoring iptables DOH rule, restarting..."
+ssh -o StrictHostKeyChecking=no louay@10.50.0.11 \
+  "sudo iptables -F SENTINEL_BLOCK 2>/dev/null; \
+   sudo iptables -N SENTINEL_DOH 2>/dev/null || sudo iptables -F SENTINEL_DOH; \
+   sudo iptables -D INPUT -p tcp --dport 443 --syn -j SENTINEL_DOH 2>/dev/null || true; \
+   sudo iptables -I INPUT -p tcp --dport 443 --syn -j SENTINEL_DOH; \
+   sudo iptables -A SENTINEL_DOH -j LOG --log-prefix 'SENTINEL_DOH_EXFIL ' --log-level 4; \
+   sudo iptables -A SENTINEL_DOH -j RETURN; \
+   sudo truncate -s 0 /var/log/sentinel-doh-alert.log 2>/dev/null; \
+   sudo truncate -s 0 /var/log/sentinel-doh-exfil.log 2>/dev/null; \
+   sudo systemctl restart sentinel-doh-formatter 2>/dev/null; \
+   echo doh_iptables_restored" 2>/dev/null \
+  | grep -E "restored|failed" || true
+
+# 8b-dnsdist) Fix dnsdist config syntax + restart on srv-dns-bind
 echo "[8b] Fixing dnsdist config and restarting..."
 $ANSIBLE $INV srv-dns-bind -m shell --become \
   -a 'sed -i "s/addAction(NetmaskGroupRule(newNMG():addMask(\(.*\)), DropAction())/local _nmg = newNMG(); _nmg:addMask(\1); addAction(NetmaskGroupRule(_nmg), DropAction())/g" /etc/dnsdist/dnsdist.conf && cp /etc/dnsdist/dnsdist.conf /var/lib/sentinel-ai/baselines/_etc_dnsdist_dnsdist.conf.baseline && systemctl restart dnsdist && systemctl is-active dnsdist || echo failed' \
