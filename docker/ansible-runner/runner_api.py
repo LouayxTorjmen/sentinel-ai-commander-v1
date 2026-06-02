@@ -131,6 +131,14 @@ def build_outcome(task_name, lines, idx, ev):
     return task_name
 
 
+@app.route("/inventory")
+def get_inventory():
+    try:
+        with open(f"{ANSIBLE_BASE}/inventory/hosts.ini") as f:
+            return f.read(), 200, {"Content-Type": "text/plain"}
+    except Exception as e:
+        return str(e), 500
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "service": "ansible-runner-api",

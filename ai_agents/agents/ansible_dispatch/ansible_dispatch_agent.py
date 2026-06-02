@@ -251,11 +251,36 @@ PLAYBOOK_OS = {
 # follows what Wazuh currently reports.
 
 _INVENTORY_FILE = os.getenv("ANSIBLE_INVENTORY_PATH", "/ansible/inventory/hosts.ini")
+_INVENTORY_URL  = os.getenv("ANSIBLE_INVENTORY_URL", "http://sentinel-ansible-runner:5001/inventory")
 _INV_CACHE_TTL_S = 10
 _inv_cache: dict = {"ts": 0.0, "groups": {}}
 
 
+def _parse_ini_groups(content: str) -> dict:
+    """Parse INI-format inventory content into groups dict."""
+    groups: dict[str, list[str]] = {}
+    current = None
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1].split(":")[0]
+            groups.setdefault(current, [])
+        elif current and not line.startswith("["):
+            host = line.split()[0]
+            groups[current].append(host)
+    return groups
+
 def _read_inventory_groups() -> dict:
+    # Try fetching from runner API first (ai-agents has no /ansible mount)
+    try:
+        import urllib.request as _ur
+        resp = _ur.urlopen(_INVENTORY_URL, timeout=3)
+        content = resp.read().decode()
+        return _parse_ini_groups(content)
+    except Exception:
+        pass
     """Parse the live hosts.ini into {group_name: {hostname, ...}}.
     Returns {} if the file is missing or unreadable."""
     groups: dict = {}
