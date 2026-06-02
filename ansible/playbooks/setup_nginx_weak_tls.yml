@@ -192,8 +192,8 @@
         content: |
               log_format sentinel_tls 'SENTINEL_TLS $remote_addr proto=$ssl_protocol cipher=$ssl_cipher status=$status';
 
-          # SENTINEL-AI weak-TLS scenario vhost — DELIBERATELY INSECURE
-          server {
+              # SENTINEL-AI weak-TLS scenario vhost — DELIBERATELY INSECURE
+              server {
               listen 443 ssl;
               server_name {{ cert_cn }};
 
