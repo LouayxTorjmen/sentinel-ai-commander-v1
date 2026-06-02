@@ -23,7 +23,7 @@ async def consume_wazuh_alerts():
             import asyncio
             loop = asyncio.get_event_loop()
             # Only fetch alerts newer than last poll window to avoid seen_ids poisoning on restart
-            _since = (datetime.now(timezone.utc) - timedelta(seconds=300)).strftime("%Y-%m-%dT%H:%M:%SZ")  # 5min lookback catches buffered agent events
+            _since = (datetime.now(timezone.utc) - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")  # 60s lookback
             alerts = await loop.run_in_executor(None, lambda: client.get_alerts(limit=500, level_gte=5, timestamp_gte=_since))
             new_alerts = []
             for alert in alerts:

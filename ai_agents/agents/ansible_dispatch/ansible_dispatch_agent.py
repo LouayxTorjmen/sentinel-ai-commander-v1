@@ -558,6 +558,10 @@ class HybridAnsibleDispatcher(BaseAgent):
             os_of_agent(agent_name) != "windows"):
             agent_name = "srv-ad-dns"
             extra_vars["target_hosts"] = "srv-ad-dns"
+        # AS-REP Roast: src IP is the DC itself — clear it to prevent self-blocking
+        if rule_id in {"100700", "100701"}:
+            extra_vars["source_ip"] = ""
+            extra_vars["block_attacker"] = False
         target_os = os_of_agent(agent_name)
         if target_os is None:
             self.logger.info(
