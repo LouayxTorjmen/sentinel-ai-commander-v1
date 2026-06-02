@@ -96,7 +96,17 @@ echo "[8b] Fixing dnsdist config and restarting..."
 $SSH_DNS "sudo python3 /usr/local/bin/fix_dnsdist_clean.py && sudo systemctl restart dnsdist && sudo systemctl is-active dnsdist || echo failed" 2>/dev/null | grep -E "fixed|active|failed" || true
 # Verify dnsdist actually started — if not, force clean and retry
 $SSH_DNS "sudo systemctl is-active dnsdist || (sudo python3 /usr/local/bin/fix_dnsdist_clean.py && sudo systemctl restart dnsdist && sudo systemctl is-active dnsdist)" 2>/dev/null | grep -E "active|failed" || true
+# 9c) Ensure Wazuh agents are running on Windows hosts
+echo "[9c] Starting Wazuh agents on Windows hosts..."
+$ANSIBLE $INV srv-ad-dns -m win_shell   -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue;       (Get-Service WazuhSvc).Status'   2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
+$ANSIBLE $INV srv-ftp -m win_shell   -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue;       (Get-Service WazuhSvc).Status'   2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
+
 # 10) Re-arm Act 3 scenario state — AD accounts for AS-REP roast + Kerberoast
+# 9c) Ensure Wazuh agents are running on Windows hosts
+echo "[9c] Starting Wazuh agents on Windows hosts..."
+$ANSIBLE $INV srv-ad-dns -m win_shell   -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue;       (Get-Service WazuhSvc).Status'   2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
+$ANSIBLE $INV srv-ftp -m win_shell   -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue;       (Get-Service WazuhSvc).Status'   2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
+
 # 10) Re-arm Act 3 scenario state
 echo "[10] Re-arming Act 3 AD scenario accounts..."
 $ANSIBLE $INV srv-ad-dns -m win_shell \
