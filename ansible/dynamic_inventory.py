@@ -60,7 +60,8 @@ except Exception:
     LINUX_USER_OVERRIDES = {}
 
 # Agent names that are always Linux regardless of API OS detection
-LINUX_OS_OVERRIDES = set(os.getenv("LINUX_OS_OVERRIDES", "").split(",")) - {""}
+LINUX_OS_OVERRIDES   = set(os.getenv("LINUX_OS_OVERRIDES",   "").split(",")) - {""}
+WINDOWS_OS_OVERRIDES = set(os.getenv("WINDOWS_OS_OVERRIDES", "").split(",")) - {""}
 
 # Static IP overrides for agents that register with "any" as IP
 try:
@@ -116,8 +117,11 @@ def list_agents(token: str) -> list[dict[str, Any]]:
 # ─── OS classification ───────────────────────────────────────────────
 
 def classify_os(agent: dict) -> str:
-    if agent.get("name", "") in LINUX_OS_OVERRIDES:
+    name = agent.get("name", "")
+    if name in LINUX_OS_OVERRIDES:
         return "linux"
+    if name in WINDOWS_OS_OVERRIDES:
+        return "windows"
     """Return 'linux', 'windows', or 'unknown' for an agent dict.
 
     Wazuh's agent payload has os.platform ('ubuntu', 'rhel', 'centos',
