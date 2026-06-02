@@ -103,6 +103,12 @@ _FIM_NOISE_PATTERNS = (
     # iptables save files — modified by block_ip playbook, not attacks
     "/etc/sysconfig/iptables", "/etc/iptables/rules",
     "/var/lib/sentinel-ai/", "/run/xtables.lock",
+    # Temp files — never attacks
+    "/tmp/", "/var/tmp/", "/dev/shm/",
+    # apt/dpkg temp files
+    "apt-key-gpghome", ".dpkg-", ".apt-",
+    # sed/awk temp files
+    "/etc/dnsdist/sed", "/etc/dnsdist/tmp",
     # Windows: C# compiler (csc.exe) temp artifacts spawned by Ansible/WinRM
     # itself under AppData\Local\Temp — prevents a FIM self-noise feedback loop
     # (win playbook runs -> csc.exe writes temp -> FIM fires -> playbook runs...)
