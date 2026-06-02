@@ -15,7 +15,7 @@
 - name: Add dnsdist DropAction for attacker IP (idempotent)
   ansible.builtin.lineinfile:
     path: "{{ dnsdist_config_path }}"
-    line: 'addAction(NetmaskGroupRule(newNMG():addMask("{{ attacker_ip }}/32")), DropAction())  -- {{ dns_exfil_incident_id }}'
+    line: 'local _nmg = newNMG(); _nmg:addMask("{{ attacker_ip }}/32"); addAction(NetmaskGroupRule(_nmg), DropAction())  -- {{ dns_exfil_incident_id }}'
     insertafter: "{{ dnsdist_block_marker }}"
     state: present
   when: not dry_run | bool

@@ -94,6 +94,8 @@ $SSH_DNS \
 # 8b-dnsdist) Clean dnsdist NMG block entries + restart
 echo "[8b] Fixing dnsdist config and restarting..."
 $SSH_DNS "sudo python3 /usr/local/bin/fix_dnsdist_clean.py && sudo systemctl restart dnsdist && sudo systemctl is-active dnsdist || echo failed" 2>/dev/null | grep -E "fixed|active|failed" || true
+# Verify dnsdist actually started — if not, force clean and retry
+$SSH_DNS "sudo systemctl is-active dnsdist || (sudo python3 /usr/local/bin/fix_dnsdist_clean.py && sudo systemctl restart dnsdist && sudo systemctl is-active dnsdist)" 2>/dev/null | grep -E "active|failed" || true
 # 10) Re-arm Act 3 scenario state — AD accounts for AS-REP roast + Kerberoast
 # 10) Re-arm Act 3 scenario state
 echo "[10] Re-arming Act 3 AD scenario accounts..."
