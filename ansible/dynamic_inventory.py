@@ -176,17 +176,9 @@ def render_inventory(agents: list[dict]) -> str:
             ip = AGENT_IP_OVERRIDES.get(name, "")
             if not ip:
                 continue
-        status = (a.get("status") or "").lower()
         os_type = classify_os(a)
 
-        if status != "active":
-            # Force-active agents in LINUX_OS_OVERRIDES regardless of Wazuh status
-            # (e.g. srv-dns-bind may show disconnected but is reachable via SSH)
-            if name in LINUX_OS_OVERRIDES:
-                linux_active.append((name, ip))
-            else:
-                unreachable.append((name, ip))
-            continue
+        # Always include all agents regardless of Wazuh active status
         if os_type == "linux":
             linux_active.append((name, ip))
         elif os_type == "windows":
