@@ -29,6 +29,9 @@ $ANSIBLE $INV srv-ad-dns -m win_shell \
 
 # 3) Re-arm nginx weak TLS
 echo "[3] Re-arming nginx weak TLS..."
+$ANSIBLE $INV Ubuntu-agent-web -m shell --become \
+  -a 'rm -f /etc/nginx/sites-enabled/sentinel-weak-tls.conf 2>/dev/null; true' \
+  2>&1 | tail -1
 $PLAYBOOK $INV /ansible/playbooks/setup_nginx_weak_tls.yml 2>&1 | tail -2
 
 # 3b) Ensure Apache is running after nginx re-arm
