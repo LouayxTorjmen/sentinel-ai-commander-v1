@@ -51,7 +51,6 @@ class OrchestratorAgent:
         })
 
         # Persist incident to DB
-        severity_str = log_result.get("severity", "medium").lower()
         try:
             with get_db() as db:
                 incident = Incident(
@@ -59,17 +58,17 @@ class OrchestratorAgent:
                     wazuh_alert_id=str(alert.get("id", "")),
                     rule_id=alert.get("rule", {}).get("id"),
                     rule_description=alert.get("rule", {}).get("description"),
-                    severity=SEVERITY_MAP.get(severity_str, SeverityLevel.MEDIUM),
-                    status=IncidentStatus.RESPONDING if dispatch_result.get("executed") else IncidentStatus.ANALYZING,
+                    severity=SeverityLevel.MEDIUM,
+                    status=IncidentStatus.RESPONDING if (dispatch_result or {}).get("executed") else IncidentStatus.ANALYZING,
                     source_ip=alert.get("data", {}).get("srcip"),
                     dest_ip=alert.get("data", {}).get("dstip"),
-                    mitre_techniques=log_result.get("mitre_techniques", []),
+                    mitre_techniques=[],
                     alert_data=alert,
-                    analysis=ir_result.get("analysis"),
-                    recommended_action=dispatch_result.get("playbook"),
-                    confidence_score=log_result.get("confidence", 0.0),
-                    playbook_executed=dispatch_result.get("playbook") if dispatch_result.get("executed") else None,
-                    playbook_result=dispatch_result.get("result"),
+                    analysis="static_only_mode",
+                    recommended_action=(dispatch_result or {}).get("playbook"),
+                    confidence_score=0.0,
+                    playbook_executed=(dispatch_result or {}).get("playbook") if (dispatch_result or {}).get("executed") else None,
+                    playbook_result=(dispatch_result or {}).get("result"),
                 )
                 db.add(incident)
         except Exception as e:
