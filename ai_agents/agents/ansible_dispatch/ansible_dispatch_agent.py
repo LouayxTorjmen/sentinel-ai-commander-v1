@@ -37,6 +37,10 @@ STATIC_RULE_MAP = {
     "100423": {"playbook": "block_dns_exfil", "severity": "high"},
     "100424": {"playbook": "block_dns_exfil", "severity": "critical"},
     # ─── AD-CS ESC1 abuse (Phase 2B) ──────────────────────────────────────
+    "100800": {"playbook": "win_brute_force_response", "severity": "medium"},    # FTP auth failure
+    "100801": {"playbook": "win_brute_force_response", "severity": "high"},     # FTP brute force
+    "100810": {"playbook": "win_fim_restore_response", "severity": "high"},     # FTP file staged
+    "100811": {"playbook": "win_brute_force_response", "severity": "critical"}, # FTP exfil confirmed
     "100534": {"playbook": "block_adcs_abuse", "severity": "critical"},
     "100601": {"playbook": "harden_nginx_tls", "severity": "high"},
     "100611": {"playbook": "mysql_credential_response", "severity": "critical"},

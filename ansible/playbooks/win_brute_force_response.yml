@@ -1,30 +1,28 @@
 ---
-- name: SENTINEL-AI — Brute Force Response (Windows)
-  hosts: "{{ target_hosts | default('all') }}"
+- name: SENTINEL-AI — Windows FTP Brute Force Response
+  hosts: "{{ target_hosts | default('srv-ftp') }}"
   gather_facts: yes
   become: false
-
-  pre_tasks:
-    - name: Validate source IP
-      ansible.builtin.fail:
-        msg: "source_ip is required for brute force response"
-      when: source_ip == ""
-
   roles:
     - role: win_collect_evidence
       vars:
         evidence_incident_id: "{{ incident_id }}"
         evidence_target_ip: "{{ source_ip }}"
-
     - role: win_block_ip
       vars:
         block_ip_address: "{{ source_ip }}"
-        block_ip_comment: "SENTINEL-AI: Brute force attack — incident {{ incident_id }}"
+        block_ip_comment: "SENTINEL-AI: FTP brute force — {{ incident_id }}"
         block_duration_seconds: 3600
-
+      when:
+        - source_ip != ""
+        - source_ip not in ("127.0.0.1", "::1")
+        - block_attacker | default(true) | bool
     - role: win_notify_soc
       vars:
-        notify_subject: "Brute Force Attack Blocked (Windows)"
+        notify_subject: "FTP Brute Force Blocked"
         notify_severity: "{{ severity }}"
         notify_incident_id: "{{ incident_id }}"
-        notify_message: "Source IP {{ source_ip }} blocked via Windows Firewall for 1 hour. Host: {{ ansible_hostname }}"
+        notify_message: |
+          FTP brute force detected and blocked on srv-ftp.
+          Source IP: {{ source_ip }}
+          Attacker IP added to Windows Firewall block list.
