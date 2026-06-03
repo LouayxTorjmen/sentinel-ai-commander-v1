@@ -537,11 +537,6 @@ class HybridAnsibleDispatcher(BaseAgent):
         if rule_id in {"100700", "100701", "100710", "100711"} and            ("sentinel-fw" in agent_name or "pfSense" in agent_name or
             os_of_agent(agent_name) != "windows"):
             agent_name = "srv-ad-dns"
-            extra_vars["target_hosts"] = "srv-ad-dns"
-        # AS-REP Roast: src IP is the DC itself — clear it to prevent self-blocking
-        if rule_id in {"100700", "100701"}:
-            extra_vars["source_ip"] = ""
-            extra_vars["block_attacker"] = False
         target_os = os_of_agent(agent_name)
         if target_os is None:
             self.logger.info(
@@ -608,6 +603,13 @@ class HybridAnsibleDispatcher(BaseAgent):
 
         # Step 4: Build playbook vars
         extra_vars = extract_vars_from_alert(alert)
+        # Kerberos redirect — set target_hosts after extra_vars is defined
+        if rule_id in {"100700", "100701", "100710", "100711"}:
+            extra_vars["target_hosts"] = "srv-ad-dns"
+        # AS-REP Roast: clear source_ip to prevent DC self-blocking
+        if rule_id in {"100700", "100701"}:
+            extra_vars["source_ip"] = ""
+            extra_vars["block_attacker"] = False
         # For block_ip triggered by pfSense (FreeBSD), redirect to a Linux host
         agent_name = (alert.get("agent") or {}).get("name", "")
         if decision.get("playbook") == "block_ip" and "sentinel-fw" in agent_name:
