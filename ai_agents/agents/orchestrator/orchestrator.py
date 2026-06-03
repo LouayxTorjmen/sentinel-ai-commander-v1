@@ -37,35 +37,15 @@ class OrchestratorAgent:
             dispatch_result = await self.ansible_dispatch.execute({"alert": alert, "analysis": "static_map_fast_path", "alert_type": "known_threat", "severity": STATIC_RULE_MAP[rule_id_str].get("severity", "high"), "confidence": 0.95, "source_ip": ((alert.get("data") or {}).get("srcip") or (alert.get("data") or {}).get("src_ip") or (((alert.get("data") or {}).get("win") or {}).get("eventdata") or {}).get("ipAddress") or ""), "incident_id": incident_id})
             return {"incident_id": incident_id, "dispatch": dispatch_result, "fast_path": True}
 
-        # Step 1 — Log Analysis + Classification
-        log_result = await self.log_analyzer.execute({"alert": alert, "incident_id": incident_id})
 
-        # Step 2 — Threat Intel
-        intel_result = await self.threat_intel.execute({
-            "mitre_techniques": log_result.get("mitre_techniques", []),
-            "iocs": log_result.get("iocs", {}),
-            "incident_id": incident_id,
-        })
-
-        # Step 3 — CVE Scan (keywords from summary)
-        summary = log_result.get("summary", "")
-        keywords = [w for w in summary.split()[:5] if len(w) > 4]
-        cve_result = await self.cve_scanner.execute({"keywords": keywords, "incident_id": incident_id})
-
-        # Step 4 — Incident Response Analysis
-        ir_result = await self.incident_responder.execute({
-            "summary": summary,
-            "threat_intel": intel_result,
-            "incident_id": incident_id,
-        })
-
-        # Step 5 — Ansible Dispatch Decision
+        # Phase 3 placeholder — LLM pipeline disabled, static-only mode
+        # Non-static-map alerts are instantly declined by the dispatcher
         dispatch_result = await self.ansible_dispatch.execute({
             "alert": alert,
-            "analysis": ir_result.get("analysis", ""),
-            "alert_type": log_result.get("alert_type", "other"),
-            "severity": log_result.get("severity", "medium"),
-            "confidence": log_result.get("confidence", 0.0),
+            "analysis": "static_only_mode",
+            "alert_type": "other",
+            "severity": "low",
+            "confidence": 0.0,
             "source_ip": ((alert.get("data") or {}).get("srcip") or (alert.get("data") or {}).get("src_ip") or (((alert.get("data") or {}).get("win") or {}).get("eventdata") or {}).get("ipAddress") or ""),
             "incident_id": incident_id,
         })
