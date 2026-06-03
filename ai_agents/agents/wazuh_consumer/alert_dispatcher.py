@@ -115,6 +115,9 @@ _FIM_NOISE_PATTERNS = (
     "apt-key-gpghome", ".dpkg-", ".apt-",
     # webshell uploads dir — deleted by rearm, not an attack
     "/dvwa/hackable/uploads/",
+    # System files modified by playbooks — not attacks
+    "/etc/ssl/openssl.cnf", "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
     # dnsdist sed temp files
     "dnsdist/sed", "dnsdist/tmp",
     # sed/awk temp files
