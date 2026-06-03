@@ -37,9 +37,8 @@ STATIC_RULE_MAP = {
     "100423": {"playbook": "block_dns_exfil", "severity": "high"},
     "100424": {"playbook": "block_dns_exfil", "severity": "critical"},
     # ─── AD-CS ESC1 abuse (Phase 2B) ──────────────────────────────────────
-    "100309": {"playbook": "win_incident_response",      "severity": "high"},      # FTP Windows event (no src IP)
-    "100821": {"playbook": "win_brute_force_response", "severity": "critical"},  # FTP brute force IIS log (has src IP)
-    "100823": {"playbook": "win_brute_force_response", "severity": "critical"},  # FTP brute force succeeded
+    "100309": {"playbook": "win_incident_response",      "severity": "high"},      # FTP brute force (forensics — no src IP in Windows event)
+    "100810": {"playbook": "win_fim_restore_response", "severity": "critical"},  # FTP file staged in C:\\FTP-root
     "100800": {"playbook": "win_brute_force_response", "severity": "medium"},    # FTP auth failure
     "100801": {"playbook": "win_brute_force_response", "severity": "high"},     # FTP brute force
     "100810": {"playbook": "win_fim_restore_response", "severity": "high"},     # FTP file staged
