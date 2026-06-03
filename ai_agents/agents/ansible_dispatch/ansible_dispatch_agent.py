@@ -518,33 +518,11 @@ class HybridAnsibleDispatcher(BaseAgent):
         decision = route_alert(alert)
         decision_source = decision["source"] if decision else None
 
-        # Step 2: LLM fallback
+        # Step 2: Static-only mode — no LLM fallback
+        # LLM-based triage is reserved for Phase 3 AI agent integration
         if not decision:
-            self.logger.info("dispatch.llm_fallback", rule_id=rule_id)
-            try:
-                lm = get_lm(preferred="cerebras")
-                with dspy.context(lm=lm):
-                    llm_decision = self._decide(
-                        threat_analysis=analysis,
-                        alert_type=input_data.get("alert_type", "other"),
-                        severity=input_data.get("severity", "medium"),
-                        confidence=str(input_data.get("confidence", 0.5)),
-                    )
-                if llm_decision.should_respond.strip().lower() == "yes":
-                    decision = {
-                        "source": "llm",
-                        "playbook": llm_decision.playbook,
-                        "severity": input_data.get("severity", "medium"),
-                        "confidence": float(input_data.get("confidence", 0.5)),
-                        "rule_id": rule_id,
-                        "reasoning": llm_decision.reasoning,
-                    }
-                    decision_source = "llm"
-                else:
-                    return {"executed": False, "reason": f"LLM declined: {llm_decision.reasoning}", "playbook": None}
-            except Exception as e:
-                self.logger.warning("dispatch.llm_failed", error=str(e))
-                return {"executed": False, "reason": f"LLM dispatch failed: {e}", "playbook": None}
+            self.logger.debug("dispatch.no_static_rule", rule_id=rule_id)
+            return {"executed": False, "reason": "No static rule match — skipped", "playbook": None}
 
         # Step 2.5: OS / reachability gate
         # Before doing anything else, make sure the target agent is
