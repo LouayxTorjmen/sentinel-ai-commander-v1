@@ -1455,6 +1455,7 @@ def gather_alert_context(
     agent_name: Optional[str] = None,
     time_window: str = "30m",
     min_level: int = 0,
+    keyword: Optional[str] = None,
     max_raw_alerts: int = 1000,
     max_unique_types: int = 100,
 ) -> Dict[str, Any]:
@@ -1477,8 +1478,15 @@ def gather_alert_context(
       - Any question requiring a panoramic view of recent activity
 
     agent_name: filter to a specific agent. Omit for all agents.
-    time_window: '15m', '30m', '1h', '6h', '24h'. Default '30m'.
+    time_window: dynamic — '15m', '30m', '1h', '6h', '24h', '7d', '30d'.
+                 Natural language: 'week'='7d', 'month'/'weeks'='30d' (max).
+                 Default '30m'.
     min_level: minimum Wazuh rule level (0-15). Default 0.
+    keyword: case-insensitive substring to search across rule descriptions,
+             Suricata signatures, rule groups, and file paths.
+             Examples: 'scan', 'SCAN', 'Scan', 'nmap', 'reverse shell', 'doH'.
+             If specified and not found in time_window, auto-expands up to 30d.
+             Returns explicit not-found if absent within 30d.
     max_raw_alerts: max raw docs to fetch before deduplication (1-2000).
     max_unique_types: max unique event types in output (1-200). Default 100.
     """
@@ -1566,6 +1574,216 @@ def gather_alert_context(
         key=lambda g: (g["occurrences"], g["last_seen"] or datetime.min.replace(tzinfo=timezone.utc)),
         reverse=True,
     )
+
+    # ── 3b. Keyword filter + auto-expand to 30d ─────────────────────────────────
+    _MAX_WINDOW = "30d"
+
+    def _matches_keyword(g: dict, kw: str) -> bool:
+        """Case-insensitive keyword match across all text fields of an event."""
+        kw_lower = kw.lower()
+        rec = g["record"]
+        fields = [
+            rec.get("rule_description", "") or "",
+            rec.get("suricata_signature", "") or "",
+            rec.get("suricata_category", "") or "",
+            rec.get("syscheck_path", "") or "",
+            rec.get("syscheck_event", "") or "",
+            rec.get("proto", "") or "",
+            " ".join(rec.get("rule_groups", []) or []),
+            " ".join(rec.get("mitre_all_ids", []) or []),
+            rec.get("mitre_technique_name", "") or "",
+            rec.get("src_ip", "") or "",
+        ]
+        return any(kw_lower in f.lower() for f in fields if f)
+
+    if keyword:
+        # When a keyword is given, we cannot rely on the top-N recency fetch
+        # because the matching alerts may be buried under thousands of recent
+        # noise events. Query OpenSearch directly with a text filter instead,
+        # then deduplicate that targeted result set.
+        def _fetch_with_keyword(tw: str) -> list:
+            kw_body = {
+                "size": min(max(int(max_raw_alerts), 1), 2000),
+                "sort": [{"timestamp": {"order": "desc"}}],
+                "query": {"bool": {"must": [
+                    {"range": {"timestamp": {"gte": f"now-{tw}"}}},
+                    {"bool": {"should": [
+                        {"match": {"rule.description": keyword}},
+                        {"match": {"data.alert.signature": keyword}},
+                        {"match": {"rule.groups": keyword}},
+                        {"wildcard": {"rule.description":
+                            {"value": f"*{keyword}*", "case_insensitive": True}}},
+                        {"wildcard": {"data.alert.signature":
+                            {"value": f"*{keyword}*", "case_insensitive": True}}},
+                        {"wildcard": {"syscheck.path":
+                            {"value": f"*{keyword}*", "case_insensitive": True}}},
+                    ], "minimum_should_match": 1}},
+                ]}},
+                "_source": body.get("_source", []),
+            }
+            if agent_name:
+                kw_body["query"]["bool"]["must"].append(
+                    {"match_phrase": {"agent.name": agent_name}}
+                )
+            if min_level > 0:
+                kw_body["query"]["bool"]["must"].append(
+                    {"range": {"rule.level": {"gte": int(min_level)}}}
+                )
+            try:
+                kw_data = _get_client()._indexer_request(
+                    "POST", "/wazuh-alerts-4.x-*/_search",
+                    json=kw_body,
+                    headers={"Content-Type": "application/json"},
+                )
+                return kw_data.get("hits", {}).get("hits", [])
+            except Exception:
+                return []
+
+        kw_hits = _fetch_with_keyword(time_window)
+
+        # Auto-expand to 30d if nothing found in requested window
+        searched_window = time_window
+        if not kw_hits and time_window != _MAX_WINDOW:
+            logger.info("gather_alert_context.keyword_expanding",
+                        keyword=keyword, from_window=time_window,
+                        to_window=_MAX_WINDOW)
+            kw_hits = _fetch_with_keyword(_MAX_WINDOW)
+            searched_window = _MAX_WINDOW
+
+        if not kw_hits:
+            return {
+                "summary": {
+                    "total_raw_alerts":   total_raw,
+                    "unique_event_types": 0,
+                    "keyword":            keyword,
+                    "searched_window":    _MAX_WINDOW,
+                    "agent_filter":       agent_name or "all",
+                },
+                "mitre_summary":  [],
+                "unique_events":  [],
+                "not_found":      True,
+                "message": (
+                    f"No alerts matching keyword '{keyword}' found within "
+                    f"the maximum search window of {_MAX_WINDOW}. "
+                    f"This term does not appear in this environment's alert history."
+                ),
+            }
+
+        # Deduplicate the keyword-filtered hits
+        kw_groups: dict = {}
+        for h in kw_hits:
+            rec2 = _alert_to_context_record(h.get("_source", {}))
+            key2 = _make_dedup_key(rec2)
+            ts2  = _parse_iso(rec2["timestamp"])
+            if key2 not in kw_groups:
+                kw_groups[key2] = {"record": rec2, "first_seen": ts2,
+                                   "last_seen": ts2, "occurrences": 1}
+            else:
+                gx = kw_groups[key2]
+                gx["occurrences"] += 1
+                if ts2:
+                    if gx["first_seen"] is None or ts2 < gx["first_seen"]:
+                        gx["first_seen"] = ts2
+                    if gx["last_seen"] is None or ts2 > gx["last_seen"]:
+                        gx["last_seen"] = ts2
+
+        sorted_groups = sorted(
+            kw_groups.values(),
+            key=lambda g2: (g2["occurrences"],
+                            g2["last_seen"] or datetime.min.replace(tzinfo=timezone.utc)),
+            reverse=True,
+        )
+        time_window = searched_window
+        # Skip the old post-dedup filter since we already queried by keyword
+        filtered = sorted_groups  # all results already match
+
+        if not filtered and time_window != _MAX_WINDOW:
+            # Not found in requested window — silently expand to 30d and re-fetch
+            logger.info(
+                "gather_alert_context.keyword_expanding",
+                keyword=keyword,
+                from_window=time_window,
+                to_window=_MAX_WINDOW,
+            )
+            try:
+                exp_body = {
+                    "size": min(max(int(max_raw_alerts), 1), 2000),
+                    "sort": [{"timestamp": {"order": "desc"}}],
+                    "query": {"bool": {"must": [
+                        {"range": {"timestamp": {"gte": f"now-{_MAX_WINDOW}"}}},
+                    ]}},
+                    "_source": body.get("_source", []),
+                }
+                if agent_name:
+                    exp_body["query"]["bool"]["must"].append(
+                        {"match_phrase": {"agent.name": agent_name}}
+                    )
+                if min_level > 0:
+                    exp_body["query"]["bool"]["must"].append(
+                        {"range": {"rule.level": {"gte": int(min_level)}}}
+                    )
+                exp_data = _get_client()._indexer_request(
+                    "POST", "/wazuh-alerts-4.x-*/_search",
+                    json=exp_body,
+                    headers={"Content-Type": "application/json"},
+                )
+                exp_hits_data = exp_data.get("hits", {})
+                total_raw     = exp_hits_data.get("total", {}).get("value", total_raw)
+                exp_raw_hits  = exp_hits_data.get("hits", [])
+
+                # Re-deduplicate
+                exp_groups: dict = {}
+                for h in exp_raw_hits:
+                    rec2 = _alert_to_context_record(h.get("_source", {}))
+                    key2 = _make_dedup_key(rec2)
+                    ts2  = _parse_iso(rec2["timestamp"])
+                    if key2 not in exp_groups:
+                        exp_groups[key2] = {"record": rec2, "first_seen": ts2,
+                                            "last_seen": ts2, "occurrences": 1}
+                    else:
+                        gx = exp_groups[key2]
+                        gx["occurrences"] += 1
+                        if ts2:
+                            if gx["first_seen"] is None or ts2 < gx["first_seen"]:
+                                gx["first_seen"] = ts2
+                            if gx["last_seen"] is None or ts2 > gx["last_seen"]:
+                                gx["last_seen"] = ts2
+
+                exp_sorted = sorted(
+                    exp_groups.values(),
+                    key=lambda g2: (
+                        g2["occurrences"],
+                        g2["last_seen"] or datetime.min.replace(tzinfo=timezone.utc),
+                    ),
+                    reverse=True,
+                )
+                filtered    = [g for g in exp_sorted if _matches_keyword(g, keyword)]
+                time_window = _MAX_WINDOW  # update for summary
+            except Exception as exp_exc:
+                logger.warning("gather_alert_context.expand_failed: %s", exp_exc)
+                filtered = []
+
+        if not filtered:
+            return {
+                "summary": {
+                    "total_raw_alerts":   total_raw,
+                    "unique_event_types": 0,
+                    "keyword":            keyword,
+                    "searched_window":    _MAX_WINDOW,
+                    "agent_filter":       agent_name or "all",
+                },
+                "mitre_summary":  [],
+                "unique_events":  [],
+                "not_found":      True,
+                "message": (
+                    f"No alerts matching keyword '{keyword}' found within "
+                    f"the maximum search window of {_MAX_WINDOW}. "
+                    f"This term does not appear in this environment's alert history."
+                ),
+            }
+
+        # Keyword found — restrict output to matching events only
+        sorted_groups = filtered
 
     # ── 4. Build output unique_events list ────────────────────────────────────
     unique_events = []
@@ -1764,6 +1982,18 @@ def _coerce_time_window(value):
     m = _re.match(r"(\d+[smhdwM])[-+]", s)
     if m:
         return m.group(1)
+    # Ambiguous natural language — must come before the regex
+    _NATURAL = {
+        "weeks": "30d",   # ambiguous plural → max 1 month
+        "month": "30d",
+        "months": "30d",
+        "last month": "30d",
+        "all": "30d",
+        "everything": "30d",
+    }
+    if s in _NATURAL:
+        return _NATURAL[s]
+
     # 'N days', 'N hours', etc.
     m = _re.fullmatch(r"(\d+)\s*(s|sec|second|seconds|m|min|minute|minutes|h|hour|hours|d|day|days|w|week|weeks)", s)
     if m:
