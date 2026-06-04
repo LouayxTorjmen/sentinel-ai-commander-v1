@@ -1366,6 +1366,316 @@ def get_sca_results(
 
 # =============================================================================
 
+
+from collections import defaultdict
+from datetime import datetime, timezone
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    """Parse ISO8601 timestamp string to datetime. Returns None on failure."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _alert_to_context_record(src: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract every field needed for deduplication and LLM context
+    from a raw OpenSearch _source document.
+    Extends _alert_to_summary with syscheck and full MITRE fields.
+    """
+    rule      = src.get("rule", {}) or {}
+    agent     = src.get("agent", {}) or {}
+    data      = src.get("data", {}) or {}
+    syscheck  = src.get("syscheck", {}) or {}
+    alert_sub = data.get("alert", {}) or {}
+    mitre     = rule.get("mitre", {}) or {}
+
+    src_ip = (
+        data.get("srcip") or data.get("src_ip")
+        or (((data.get("win") or {}).get("eventdata") or {}).get("ipAddress"))
+    )
+
+    # MITRE: stored as lists in Wazuh 4.x
+    mitre_ids   = mitre.get("id", [])   or []
+    mitre_techs = mitre.get("technique", []) or []
+    mitre_id   = mitre_ids[0]   if mitre_ids   else ""
+    mitre_tech = mitre_techs[0] if mitre_techs else ""
+
+    return {
+        "timestamp":          src.get("timestamp") or src.get("@timestamp"),
+        "rule_id":            str(rule.get("id", "")),
+        "rule_level":         rule.get("level", 0),
+        "rule_description":   rule.get("description", ""),
+        "rule_groups":        rule.get("groups", []),
+        "agent_name":         agent.get("name", ""),
+        "agent_ip":           agent.get("ip", ""),
+        "src_ip":             src_ip or "",
+        "dst_ip":             data.get("dstip") or data.get("dest_ip") or "",
+        "dest_port":          data.get("dest_port") or data.get("dstport"),
+        "proto":              data.get("proto", ""),
+        "suricata_signature": alert_sub.get("signature", ""),
+        "suricata_category":  alert_sub.get("category", ""),
+        "syscheck_path":      syscheck.get("path", ""),
+        "syscheck_event":     syscheck.get("event", ""),   # added/modified/deleted
+        "syscheck_md5_after": syscheck.get("md5_after", ""),
+        "mitre_technique_id":   mitre_id,
+        "mitre_technique_name": mitre_tech,
+        "mitre_all_ids":        mitre_ids,
+    }
+
+
+def _make_dedup_key(rec: Dict[str, Any]) -> tuple:
+    """
+    Three-tier uniqueness key:
+      Tier 1 (FIM):     (rule_id, agent_name, syscheck_path)
+      Tier 2 (Network): (rule_id, agent_name, src_ip)
+      Tier 3 (Default): (rule_id, agent_name)
+    """
+    rule_id    = rec["rule_id"]
+    agent_name = rec["agent_name"]
+    syscheck   = rec["syscheck_path"]
+    src_ip     = rec["src_ip"]
+
+    if syscheck:
+        return ("fim", rule_id, agent_name, syscheck)
+    elif src_ip:
+        return ("net", rule_id, agent_name, src_ip)
+    else:
+        return ("gen", rule_id, agent_name)
+
+
+# ─── Tool: gather_alert_context ───────────────────────────────────────────────
+
+
+def gather_alert_context(
+    agent_name: Optional[str] = None,
+    time_window: str = "30m",
+    min_level: int = 0,
+    max_raw_alerts: int = 1000,
+    max_unique_types: int = 100,
+) -> Dict[str, Any]:
+    """Fetch, deduplicate and compress alerts into structured LLM context.
+
+    Instead of returning thousands of raw alert lines, this tool:
+      1. Fetches up to max_raw_alerts alerts matching the filters
+      2. Groups them by (rule_id, agent, src_ip/syscheck_path) — three-tier key
+      3. First occurrence of each group is kept as a full record
+      4. Subsequent occurrences only increment the counter
+      5. Returns N unique event types (N <= max_unique_types) each with:
+         occurrences, first_seen, last_seen, duration_minutes, rate_per_minute
+
+    The LLM sees a 10:1 to 100:1 compressed view — full visibility with no
+    context waste on repetitive noise.
+
+    Use this for:
+      - Unknown-rule triage (orchestrator Phase 3 hook)
+      - "Give me a summary of what's happening on agent X"
+      - Any question requiring a panoramic view of recent activity
+
+    agent_name: filter to a specific agent. Omit for all agents.
+    time_window: '15m', '30m', '1h', '6h', '24h'. Default '30m'.
+    min_level: minimum Wazuh rule level (0-15). Default 0.
+    max_raw_alerts: max raw docs to fetch before deduplication (1-2000).
+    max_unique_types: max unique event types in output (1-200). Default 100.
+    """
+    # ── 1. Fetch raw alerts from OpenSearch ───────────────────────────────────
+    body: Dict[str, Any] = {
+        "size": min(max(int(max_raw_alerts), 1), 2000),
+        "sort": [{"timestamp": {"order": "desc"}}],
+        "query": {"bool": {"must": [
+            {"range": {"timestamp": {"gte": f"now-{time_window}"}}},
+        ]}},
+        "_source": [
+            "timestamp", "@timestamp",
+            "rule.id", "rule.level", "rule.description", "rule.groups", "rule.mitre",
+            "agent.name", "agent.ip",
+            "data.srcip", "data.src_ip", "data.dstip", "data.dest_ip",
+            "data.dest_port", "data.dstport", "data.proto",
+            "data.alert.signature", "data.alert.category",
+            "data.win.eventdata.ipAddress",
+            "syscheck.path", "syscheck.event", "syscheck.md5_after",
+        ],
+    }
+    must = body["query"]["bool"]["must"]
+
+    if agent_name:
+        must.append({"match_phrase": {"agent.name": agent_name}})
+    if min_level > 0:
+        must.append({"range": {"rule.level": {"gte": int(min_level)}}})
+
+    try:
+        data = _get_client()._indexer_request(
+            "POST", "/wazuh-alerts-4.x-*/_search",
+            json=body,
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception as exc:
+        logger.warning("agent_tools.gather_alert_context.fetch_failed: %s", exc)
+        return {"error": str(exc), "unique_events": [], "summary": {}}
+
+    hits       = data.get("hits", {})
+    total_raw  = hits.get("total", {}).get("value", 0)
+    raw_hits   = hits.get("hits", [])
+
+    if not raw_hits:
+        return {
+            "summary": {
+                "total_raw_alerts": total_raw,
+                "unique_event_types": 0,
+                "time_window": time_window,
+                "agent_filter": agent_name or "all",
+                "compression_ratio": "N/A",
+            },
+            "mitre_summary": [],
+            "unique_events": [],
+            "hint": f"No alerts in the last {time_window}. Try a longer time_window.",
+        }
+
+    # ── 2. Parse + deduplicate ────────────────────────────────────────────────
+    # groups: key → {first_record, first_ts, last_ts, occurrences}
+    groups: Dict[tuple, Dict[str, Any]] = {}
+
+    for h in raw_hits:
+        rec = _alert_to_context_record(h.get("_source", {}))
+        key = _make_dedup_key(rec)
+        ts  = _parse_iso(rec["timestamp"])
+
+        if key not in groups:
+            groups[key] = {
+                "record":      rec,
+                "first_seen":  ts,
+                "last_seen":   ts,
+                "occurrences": 1,
+            }
+        else:
+            g = groups[key]
+            g["occurrences"] += 1
+            if ts:
+                if g["first_seen"] is None or ts < g["first_seen"]:
+                    g["first_seen"] = ts
+                if g["last_seen"] is None or ts > g["last_seen"]:
+                    g["last_seen"] = ts
+
+    # ── 3. Sort: highest occurrences first, then most recent ─────────────────
+    sorted_groups = sorted(
+        groups.values(),
+        key=lambda g: (g["occurrences"], g["last_seen"] or datetime.min.replace(tzinfo=timezone.utc)),
+        reverse=True,
+    )
+
+    # ── 4. Build output unique_events list ────────────────────────────────────
+    unique_events = []
+    all_timestamps = []
+
+    for g in sorted_groups[:max_unique_types]:
+        rec        = g["record"]
+        first_seen = g["first_seen"]
+        last_seen  = g["last_seen"]
+        occ        = g["occurrences"]
+
+        # Duration and rate
+        if first_seen and last_seen and first_seen != last_seen:
+            duration_s   = (last_seen - first_seen).total_seconds()
+            duration_min = round(duration_s / 60, 2)
+            rate_per_min = round(occ / max(duration_min, 0.1), 2)
+        else:
+            duration_min = 0.0
+            rate_per_min = float(occ)  # all at once
+
+        first_str = first_seen.isoformat() if first_seen else None
+        last_str  = last_seen.isoformat()  if last_seen  else None
+
+        if first_seen:
+            all_timestamps.append(first_seen)
+        if last_seen:
+            all_timestamps.append(last_seen)
+
+        unique_events.append({
+            "rule_id":              rec["rule_id"],
+            "rule_description":     rec["rule_description"],
+            "rule_level":           rec["rule_level"],
+            "rule_groups":          rec["rule_groups"],
+            "agent_name":           rec["agent_name"],
+            "src_ip":               rec["src_ip"] or None,
+            "dst_ip":               rec["dst_ip"] or None,
+            "dest_port":            rec["dest_port"],
+            "proto":                rec["proto"] or None,
+            "suricata_signature":   rec["suricata_signature"] or None,
+            "suricata_category":    rec["suricata_category"] or None,
+            "syscheck_path":        rec["syscheck_path"] or None,
+            "syscheck_event":       rec["syscheck_event"] or None,
+            "mitre_technique_id":   rec["mitre_technique_id"] or None,
+            "mitre_technique_name": rec["mitre_technique_name"] or None,
+            "occurrences":          occ,
+            "first_seen":           first_str,
+            "last_seen":            last_str,
+            "duration_minutes":     duration_min,
+            "rate_per_minute":      rate_per_min,
+        })
+
+    # ── 5. MITRE summary ──────────────────────────────────────────────────────
+    mitre_agg: Dict[str, Dict[str, Any]] = {}
+    for g in sorted_groups:
+        rec        = g["record"]
+        tech_id    = rec["mitre_technique_id"]
+        tech_name  = rec["mitre_technique_name"]
+        if not tech_id:
+            continue
+        if tech_id not in mitre_agg:
+            mitre_agg[tech_id] = {
+                "technique_id":   tech_id,
+                "technique_name": tech_name,
+                "total_occurrences": 0,
+                "unique_rules": set(),
+            }
+        mitre_agg[tech_id]["total_occurrences"] += g["occurrences"]
+        mitre_agg[tech_id]["unique_rules"].add(rec["rule_id"])
+
+    mitre_summary = sorted(
+        [
+            {
+                "technique_id":      v["technique_id"],
+                "technique_name":    v["technique_name"],
+                "total_occurrences": v["total_occurrences"],
+                "unique_rules":      sorted(v["unique_rules"]),
+            }
+            for v in mitre_agg.values()
+        ],
+        key=lambda x: x["total_occurrences"],
+        reverse=True,
+    )
+
+    # ── 6. Global time range ──────────────────────────────────────────────────
+    time_range = {}
+    if all_timestamps:
+        time_range = {
+            "first": min(all_timestamps).isoformat(),
+            "last":  max(all_timestamps).isoformat(),
+        }
+
+    unique_count     = len(groups)
+    shown_count      = len(unique_events)
+    compression      = f"{len(raw_hits)}:{unique_count}" if unique_count else "N/A"
+
+    return {
+        "summary": {
+            "total_raw_alerts":   total_raw,
+            "fetched_for_dedup":  len(raw_hits),
+            "unique_event_types": unique_count,
+            "shown_in_output":    shown_count,
+            "time_window":        time_window,
+            "agent_filter":       agent_name or "all",
+            "compression_ratio":  compression,
+            "time_range":         time_range,
+        },
+        "mitre_summary": mitre_summary,
+        "unique_events":  unique_events,
+    }
+
 TOOLS: Dict[str, Any] = {
     "search_alerts": search_alerts,
     "count_alerts": count_alerts,
@@ -1384,6 +1694,7 @@ TOOLS: Dict[str, Any] = {
     "execute_playbook":          execute_playbook,
     "get_active_blocks":         get_active_blocks,
     "get_sca_results":           get_sca_results,
+    "gather_alert_context":      gather_alert_context,
 }
 
 
