@@ -16,7 +16,7 @@ Usage:
         phase="decision_made",
         incident_id=incident_id,
         triggering_rule_id="100231",
-        target_agent="srv-ftp",
+        target_agent=os.getenv("SENTINEL_FEEDBACK_AGENT", ""),
         playbook="file_quarantine_response",
         decision_source="static_map",
         ai_severity="high",

@@ -1053,22 +1053,31 @@ def execute_playbook(
     s = get_settings()
     base_url = f"http://{s.ansible_runner_host}:{s.ansible_runner_port}"
 
-    # Normalise target_host — map friendly names to actual Ansible inventory names
-    _HOST_ALIASES = {
-        "srv-web":        "Ubuntu-agent-web",
-        "web":            "Ubuntu-agent-web",
-        "ubuntu-web":     "Ubuntu-agent-web",
-        "webserver":      "Ubuntu-agent-web",
-        "dns":            "srv-dns-bind",
-        "bind":           "srv-dns-bind",
-        "sql":            "srv-sql",
-        "mysql":          "srv-sql",
-        "db":             "srv-sql",
-        "ad":             "srv-ad-dns",
-        "dc":             "srv-ad-dns",
-        "ftp":            "srv-ftp",
+    # Normalise target_host — try to resolve short names to real agent names
+    # First check a static alias map (common short names), then fuzzy-match
+    # against the live Wazuh agent list.
+    _STATIC_ALIASES = {
+        "web": "web", "webserver": "web", "dns": "dns", "bind": "dns",
+        "sql": "sql", "mysql": "sql", "db": "sql", "ad": "ad",
+        "dc": "ad", "ftp": "ftp", "fw": "fw", "firewall": "fw",
+        "gateway": "fw",
     }
-    target_host = _HOST_ALIASES.get(target_host.lower().strip(), target_host)
+    _normalized = target_host.lower().strip()
+    _keyword    = _STATIC_ALIASES.get(_normalized, _normalized)
+    try:
+        from ai_agents.config_topology import get_topology as _topo_fn
+        _agents = _topo_fn().get_all_agents()
+        # Exact match first
+        _exact = next((a["name"] for a in _agents if a["name"].lower() == _normalized), None)
+        if _exact:
+            target_host = _exact
+        else:
+            # Keyword substring match
+            _fuzzy = next((a["name"] for a in _agents if _keyword in a["name"].lower()), None)
+            if _fuzzy:
+                target_host = _fuzzy
+    except Exception:
+        pass  # keep original if topology unavailable
 
     # Validate playbook name
     if playbook not in _CHATBOT_ALLOWED_PLAYBOOKS:
@@ -1092,13 +1101,23 @@ def execute_playbook(
         return {"error": f"Playbook '{playbook}' requires source_ip (the attacker's IP address)."}
 
     # Safety: never block loopback or management subnet
-    if source_ip and (
-        source_ip in ("127.0.0.1", "::1")
-        or source_ip.startswith("10.60.")
-    ):
-        return {
-            "error": f"Refusing to block protected IP '{source_ip}' (loopback or management subnet)."
-        }
+    if source_ip:
+        try:
+            from ai_agents.config_topology import get_topology as _topo_fn2
+            if not _topo_fn2().is_safe_to_block(source_ip):
+                return {
+                    "error": f"Refusing to block protected IP '{source_ip}' "
+                             f"(loopback or management subnet per SENTINEL_MANAGEMENT_SUBNETS)."
+                }
+        except Exception:
+            # Fallback safety check if topology unavailable
+            import ipaddress as _ipa
+            try:
+                _addr = _ipa.ip_address(source_ip)
+                if _addr.is_loopback:
+                    return {"error": f"Refusing to block loopback IP '{source_ip}'."}
+            except ValueError:
+                pass
 
     # ── Phase 1: Confirmation prompt ─────────────────────────────────
     if not confirmed:

@@ -533,14 +533,27 @@ class HybridAnsibleDispatcher(BaseAgent):
         # (a) reachable in the current inventory, and
         # (b) running an OS the chosen playbook actually supports.
         agent_name = (alert.get("agent") or {}).get("name") or ""
-        # Reroute pfSense block_ip to a Linux host (pfSense is FreeBSD/unknown)
-        if decision.get("playbook") == "block_ip" and "sentinel-fw" in agent_name:
-            agent_name = "Ubuntu-agent-web"
+        # Reroute gateway block_ip to a real Linux agent
+        # (the gateway agent is FreeBSD/pfSense — can't run iptables playbooks)
+        from ai_agents.config_topology import get_topology as _get_topo
+        _topo = _get_topo()
+        _gw   = _topo.get_gateway_agent()
+        if decision.get("playbook") == "block_ip" and _gw and _gw in agent_name:
+            _redirect = _topo.get_fw_redirect_target()
+            if _redirect:
+                agent_name = _redirect
 
-        # Kerberos alerts from pfSense/Suricata — redirect to srv-ad-dns (Windows DC)
-        if rule_id in {"100700", "100701", "100710", "100711"} and            ("sentinel-fw" in agent_name or "pfSense" in agent_name or
-            os_of_agent(agent_name) != "windows"):
-            agent_name = "srv-ad-dns"
+        # Kerberos alerts from gateway/pfSense — redirect to the Windows DC
+        # The DC is the first Windows agent in the inventory
+        if rule_id in {"100700", "100701", "100710", "100711"} and (
+            (_gw and _gw in agent_name) or "pfSense" in agent_name
+            or os_of_agent(agent_name) != "windows"
+        ):
+            windows_agents = list(_topo.get_windows_agents())
+            # Prefer agents with 'ad', 'dc', 'domain' in the name
+            dc_candidates = [a for a in windows_agents
+                             if any(kw in a.lower() for kw in ("ad", "dc", "domain", "controller"))]
+            agent_name = dc_candidates[0] if dc_candidates else (windows_agents[0] if windows_agents else agent_name)
         target_os = os_of_agent(agent_name)
         if target_os is None:
             self.logger.info(
@@ -609,16 +622,26 @@ class HybridAnsibleDispatcher(BaseAgent):
         extra_vars = extract_vars_from_alert(alert)
         # Kerberos redirect — set target_hosts after extra_vars is defined
         if rule_id in {"100700", "100701", "100710", "100711"}:
-            extra_vars["target_hosts"] = "srv-ad-dns"
+            from ai_agents.config_topology import get_topology as _get_topo3
+            _topo3   = _get_topo3()
+            _windows = list(_topo3.get_windows_agents())
+            _dc_list = [a for a in _windows
+                        if any(kw in a.lower() for kw in ("ad", "dc", "domain", "controller"))]
+            extra_vars["target_hosts"] = _dc_list[0] if _dc_list else (_windows[0] if _windows else "srv-ad-dns")
         # AS-REP Roast: clear source_ip to prevent DC self-blocking
         if rule_id in {"100700", "100701"}:
             extra_vars["source_ip"] = ""
             extra_vars["block_attacker"] = False
-        # For block_ip triggered by pfSense (FreeBSD), redirect to a Linux host
+        # For block_ip triggered by gateway (FreeBSD/pfSense), redirect to Linux host
         agent_name = (alert.get("agent") or {}).get("name", "")
-        if decision.get("playbook") == "block_ip" and "sentinel-fw" in agent_name:
-            extra_vars["target_hosts"] = "Ubuntu-agent-web"
-            extra_vars["block_ip_address"] = extra_vars.get("source_ip", "")
+        from ai_agents.config_topology import get_topology as _get_topo2
+        _topo2 = _get_topo2()
+        _gw2   = _topo2.get_gateway_agent()
+        if decision.get("playbook") == "block_ip" and _gw2 and _gw2 in agent_name:
+            _redir = _topo2.get_fw_redirect_target()
+            if _redir:
+                extra_vars["target_hosts"]    = _redir
+                extra_vars["block_ip_address"] = extra_vars.get("source_ip", "")
         extra_vars.update({
             "incident_id": incident_id,
             "severity": decision["severity"],

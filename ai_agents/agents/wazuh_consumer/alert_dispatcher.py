@@ -138,7 +138,16 @@ _recent_dispatches: dict = {}
 
 
 # Windows agents use an allowlist approach for FIM — only critical paths dispatch
-_FIM_WINDOWS_AGENTS = {"srv-ad-dns", "srv-ftp"}
+# Windows agents for FIM — loaded dynamically from topology config
+def _get_fim_windows_agents() -> set:
+    try:
+        from ai_agents.config_topology import get_topology
+        return get_topology().get_windows_agents()
+    except Exception:
+        return set()
+
+# Backwards-compatible name used elsewhere in this file
+_FIM_WINDOWS_AGENTS_DYNAMIC = True  # flag: use _get_fim_windows_agents() not the set
 _FIM_WINDOWS_CRITICAL_PATHS = (
     # System binaries — modification = rootkit/tamper
     "\\system32\\", "\\syswow64\\",
@@ -171,7 +180,7 @@ def _is_fim_noise(alert: dict) -> bool:
         return False
 
     # Windows agents: allowlist approach — noise unless path is critical
-    if agent_name in _FIM_WINDOWS_AGENTS:
+    if agent_name in _get_fim_windows_agents():
         is_critical = any(crit in path for crit in _FIM_WINDOWS_CRITICAL_PATHS)
         return not is_critical  # noise=True if NOT critical
 
