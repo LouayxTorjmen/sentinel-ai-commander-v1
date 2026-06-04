@@ -169,7 +169,7 @@ class ChatEngine:
         except Exception as e:
             logger.warning("chat.save_message_failed: %s", e)
 
-    def _update_summary(self, session_id: str, recent_messages: List[Dict], old_summary: str):
+    def _update_summary(self, session_id: str, recent_messages: List[Dict], old_summary: str, lm=None):
         """Update rolling summary every 4 messages."""
         try:
             if len(recent_messages) < 4:
@@ -179,7 +179,8 @@ class ChatEngine:
                 for m in recent_messages[-6:]
             )
             self._ensure_chain()
-            with dspy.context(lm=lm):
+            _lm = lm or get_lm()
+            with dspy.context(lm=_lm):
                 result = self._summarizer(
                     conversation=conversation,
                     previous_summary=old_summary or "No previous context.",
@@ -335,7 +336,7 @@ class ChatEngine:
             # Update rolling summary periodically
             recent_messages.append({"role": "user", "content": question})
             recent_messages.append({"role": "assistant", "content": result.answer})
-            self._update_summary(session_id, recent_messages, summary)
+            self._update_summary(session_id, recent_messages, summary, lm=lm)
 
             return answer_data
 

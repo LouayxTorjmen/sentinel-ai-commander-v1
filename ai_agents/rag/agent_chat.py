@@ -163,17 +163,27 @@ def run_agentic_chat(
         # Detect provider from the lm object's model string (DSPy LM
         # exposes .model like "ollama_chat/mistral:7b" / "groq/llama..." )
         model_str = getattr(lm, "model", "") or ""
-        provider = "ollama" if model_str.startswith("ollama") else (
-            "groq" if model_str.startswith("groq") else (
-                "gemini" if model_str.startswith("gemini") else "unknown"
-            )
-        )
+        if model_str.startswith("ollama"):
+            provider = "ollama"
+        elif model_str.startswith("cerebras"):
+            provider = "cerebras"
+        elif model_str.startswith("groq"):
+            provider = "groq"
+        elif model_str.startswith("gemini"):
+            provider = "gemini"
+        else:
+            provider = "unknown"
+
         if agent_chat_native.is_native_enabled(provider):
-            logger.info("agent_chat.routing_to_native_ollama provider=%s model=%s", provider, model_str)
+            logger.info(
+                "agent_chat.routing_to_native provider=%s model=%s",
+                provider, model_str,
+            )
             return agent_chat_native.run_agentic_chat_native(
                 question=question,
                 seed_context=seed_context,
                 conversation_summary=conversation_summary,
+                provider=provider,
             )
     except Exception as exc:
         logger.warning("agent_chat.native_path_failed_falling_back: %s", exc)

@@ -1,13 +1,17 @@
 """
-Ollama native function-calling path for the agentic chatbot.
+Native function-calling path for the agentic chatbot.
 
-Talks directly to Ollama's /api/chat endpoint with the OpenAI-style
-'tools' parameter. Mistral 7B v0.3 emits structured tool calls in
-JSON, eliminating the prose-vs-JSON parsing fragility we hit with
-the DSPy-driven ReAct path.
+Three providers are supported:
+  - Ollama  : uses /api/chat with OpenAI-style tools[] (original path, unchanged)
+  - Cerebras: uses /v1/chat/completions (OpenAI-compat API)
+  - Groq    : uses /openai/v1/chat/completions (OpenAI-compat API)
 
-Same return shape as agent_chat.run_agentic_chat:
-    {"answer": str, "tool_calls": [...], "iterations": int}
+All three paths share the same tool schema builder, system prompt, and
+return the same shape: {"answer": str, "tool_calls": [...], "iterations": int}
+
+Environment flags:
+  NATIVE_TOOLS_ENABLED=true   — enables native calling for Cerebras + Groq (default: true)
+  OLLAMA_NATIVE_TOOLS=true    — enables native calling for Ollama (default: false, opt-in)
 """
 from __future__ import annotations
 
@@ -15,7 +19,8 @@ import inspect
 import json
 import logging
 import os
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -23,90 +28,90 @@ from ai_agents.rag import agent_tools
 
 logger = logging.getLogger(__name__)
 
+# ── Gemini config (OpenAI-compat endpoint) ───────────────────────────────────────
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").removeprefix("gemini/").removeprefix("models/")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+
+# ── Ollama config (unchanged) ─────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://sentinel-ollama:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral:7b")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "mistral:7b")
+
+# ── Cerebras config ───────────────────────────────────────────────────────────
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+CEREBRAS_MODEL   = os.getenv("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
+CEREBRAS_API_URL = "https://api.cerebras.ai/v1/chat/completions"
+
+# ── Groq config ───────────────────────────────────────────────────────────────
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
 MAX_ITERATIONS = int(os.getenv("AGENTIC_CHAT_MAX_ITERATIONS", "5"))
-HTTP_TIMEOUT = int(os.getenv("OLLAMA_HTTP_TIMEOUT", "180"))
+HTTP_TIMEOUT   = int(os.getenv("NATIVE_HTTP_TIMEOUT", "60"))
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_HTTP_TIMEOUT", "180"))
 
 
-# ─── Tool schema generation ──────────────────────────────────────────
+# ── Tool schema generation (shared across all providers) ─────────────────────
 
-
-# Parameter type hints per tool. We map Python type annotations to
-# JSON schema types via inspection; for plain-string args without a
-# hint we default to "string".
 _PY_TO_JSON_TYPE = {
-    int: "integer",
-    float: "number",
-    bool: "boolean",
-    str: "string",
-    list: "array",
-    dict: "object",
+    int: "integer", float: "number", bool: "boolean",
+    str: "string", list: "array", dict: "object",
 }
 
 
 def _python_type_to_schema(annotation: Any) -> Dict[str, Any]:
-    """Convert a Python type annotation to JSON schema fragment.
-
-    Handles bare types (int, str), Optional[X], and List[X]. Falls
-    back to {'type': 'string'} for anything weird.
-    """
     if annotation is inspect.Parameter.empty:
         return {"type": "string"}
-
-    # typing.Optional[X] / Union[X, None]
     origin = getattr(annotation, "__origin__", None)
-    args = getattr(annotation, "__args__", ())
-
-    if origin is type(None):  # noqa: E721
-        return {"type": "null"}
-
-    # Optional[X] is Union[X, None]
+    args   = getattr(annotation, "__args__", ())
     if origin is not None and len(args) >= 1:
         non_none = [a for a in args if a is not type(None)]  # noqa: E721
         if len(non_none) == 1:
             return _python_type_to_schema(non_none[0])
         if origin in (list, tuple):
-            return {"type": "array"}
+            # Include items field — required by Groq and strict OpenAI validators
+            inner = non_none[0] if non_none else str
+            inner_schema = _python_type_to_schema(inner) if inner is not str else {"type": "string"}
+            return {"type": "array", "items": inner_schema}
         if origin is dict:
             return {"type": "object"}
-
     if annotation in _PY_TO_JSON_TYPE:
         return {"type": _PY_TO_JSON_TYPE[annotation]}
-
     return {"type": "string"}
 
 
 _PARAM_HINTS = {
-    "signature_contains": "Substring to match against alert signatures (e.g. 'sql', 'nmap', 'brute', 'sqli'). Use single broad keyword.",
-    "path_contains":      "Substring of a file path for FIM/syscheck queries (e.g. 'hello.txt', 'passwd', '/etc/'). Use this when the user names a specific file.",
-    "agent_name":         "Name of a specific Wazuh agent (e.g. 'auto-victim1-ubuntu', 'kali-agent-1'). Omit to search all agents.",
-    "src_ip":             "Source IP address (e.g. '192.168.49.131').",
+    "signature_contains": "Substring to match against alert signatures (e.g. 'sql', 'nmap', 'brute'). One broad keyword.",
+    "path_contains":      "Substring of a file path for FIM queries (e.g. 'hello.txt', '/etc/'). Use for specific file questions.",
+    "agent_name":         "Exact Wazuh agent name (e.g. 'srv-web', 'srv-ad-dns', 'srv-sql'). Omit to search all agents.",
+    "src_ip":             "Source IP address (e.g. '10.70.0.10').",
     "dst_ip":             "Destination IP address.",
-    "dest_port":          "Destination port number (e.g. 80, 22, 443).",
-    "time_window":        "OpenSearch date math: '24h', '7d', '30d', '1h', '30m'. Default '24h'. Use '7d' for recent, '30d' for any.",
-    "min_level":          "Minimum Wazuh rule level 0-15 as integer. 0=info, 5=medium, 7=high, 10=critical. Default 0.",
+    "dest_port":          "Destination port number as integer (e.g. 80, 22, 443).",
+    "time_window":        "OpenSearch date math: '24h', '7d', '30d', '1h', '30m'. Default '24h'.",
+    "min_level":          "Minimum Wazuh rule level as integer 0-15. 0=info, 5=medium, 7=high, 10=critical. Default 0.",
     "limit":              "Maximum results to return as integer (1-200). Default 100.",
-    "rule_groups":        "List of Wazuh rule groups to filter by (e.g. ['authentication_failed', 'syscheck']).",
+    "rule_groups":        "List of Wazuh rule groups e.g. ['authentication_failed', 'syscheck'].",
     "doc_id":             "OpenSearch document ID from a prior search result.",
     "doc_index":          "OpenSearch index name from a prior search result.",
     "incident_id":        "UUID of an incident from get_incidents.",
     "severity":           "Incident severity: 'low', 'medium', 'high', 'critical'.",
     "status":             "Incident status: 'open', 'analyzing', 'closed'.",
-    "kind":               "Inventory kind: 'packages', 'processes', 'ports', 'users', 'services', 'os'.",
-    "contains":           "Substring filter on inventory results.",
-    "query":              "Free-text query for archive search.",
-    "top_n":              "Number of top results to return.",
+    "kind":               "Inventory kind: 'packages', 'processes', 'ports', 'users', 'services'.",
+    "contains":           "Substring filter on inventory item names.",
+    "query":              "Free-text query string for archive search.",
+    "top_n":              "Number of top results to return as integer.",
+    "rule_id":            "Wazuh rule ID as string (e.g. '100601', '550').",
+    "playbook":           "Ansible playbook name (e.g. 'block_ip', 'incident_response', 'harden_nginx_tls').",
+    "target_host":        "Wazuh agent name to run the playbook on (e.g. 'srv-web'). Never 'all'.",
+    "confirmed":          "False = preview/confirmation prompt, True = actually execute. Always False on first call.",
+    "source_ip":          "Source IP address to block (required for block_ip and similar playbooks).",
+    "reason":             "Human-readable reason for the action (for audit log).",
 }
 
 
 def _build_tools_schema() -> List[Dict[str, Any]]:
-    """Build the OpenAI-format tools array from agent_tools.TOOLS.
-
-    Each parameter includes a 'description' string with concrete
-    examples to steer smaller models away from mirroring the schema
-    shape back as their argument value.
-    """
+    """Build OpenAI-format tools array from agent_tools.TOOLS."""
     schemas: List[Dict[str, Any]] = []
     for name, fn in agent_tools.TOOLS.items():
         doc = (fn.__doc__ or "").strip()
@@ -137,65 +142,454 @@ def _build_tools_schema() -> List[Dict[str, Any]]:
     return schemas
 
 
-# ─── System prompt ───────────────────────────────────────────────────
+# ── Shared system prompt ──────────────────────────────────────────────────────
 
+SYSTEM_PROMPT = """You are SENTINEL-AI, a SOC analyst with tools that query a Wazuh + Suricata SIEM. Your lab network:
+- 10.50.0.0/24: DMZ victim servers (Ubuntu-agent-web=10.50.0.12, srv-sql=10.50.0.13, srv-dns-bind=10.50.0.11, srv-ad-dns=10.50.0.10, srv-ftp=10.50.0.14)
+- 10.60.0.0/24: Management (Docker host, Ansible runner)
+- 10.70.0.0/24: Attacker Kali Linux (10.70.0.10)
 
-SYSTEM_PROMPT = """You are SENTINEL-AI, a SOC analyst with tools that query a Wazuh + Suricata indexer. Use function calling, not prose.
+TOOL SELECTION:
+- search_alerts: primary tool for ALL security questions (alerts, attacks, FIM, scans, SSH, web attacks, Kerberos)
+  - For "what happened / summary / overview" questions: ALWAYS add min_level=7 to filter noise
+  - For "any attacks / active threats" questions: use min_level=10
+  - For FIM/file questions: use path_contains="filename", NOT signature_contains
+  - signature_contains matches rule descriptions, not file paths
+  - NEVER call search_alerts without min_level for broad summary questions — 10K noise alerts are useless
+  - For FIM/file questions: use path_contains="filename", NOT signature_contains
+  - signature_contains matches rule descriptions, not file paths
+- search_archives: ONLY for events that did NOT trigger an alert (rare)
+- count_alerts: "how many" without details
+- top_signatures: "most common" alert types
+- list_agents: enrolled hosts
+- get_agent_details: status, OS, last seen for a specific agent
+- get_agent_vulnerabilities: CVEs on a specific agent
+- get_wazuh_rule: why did rule X fire? what does it detect?
+- get_fim_events: file integrity changes on a specific path
+- get_incidents: triaged incidents from the orchestrator database
+- agent_inventory: installed packages, running processes, open ports
+- get_sca_results: CIS benchmark compliance results
+- get_active_blocks: what IPs are currently blocked, why was X banned
+- execute_playbook: run a response playbook (ALWAYS call with confirmed=False first)
 
-WHICH TOOL TO USE:
-- search_alerts: file changes (FIM), SQL injection, scans, brute force, web attacks, anything from a specific IP/agent. THIS IS THE DEFAULT.
-  - For FIM events about a SPECIFIC file (e.g. "hello.txt"): use path_contains="hello.txt", NOT signature_contains.
-  - signature_contains matches rule descriptions ("File deleted", "Integrity checksum changed") not file paths.
-- search_archives: only for events that did NOT trigger an alert (rare).
-- count_alerts: "how many" without details.
-- top_signatures: "most common" alerts.
-- list_agents: enrolled hosts.
-- get_incidents: triaged incidents.
-- agent_inventory: what is installed on a host.
+EXECUTE_PLAYBOOK RULES (critical):
+1. ALWAYS call execute_playbook with confirmed=False first — this shows the user what will happen
+2. Present the confirmation message to the user word for word
+3. ONLY call with confirmed=True after the user explicitly says 'confirm', 'yes', 'do it', or similar
+4. Never skip the confirmation step, even if the user seems sure
 
 ARG RULES:
-- signature_contains is ONE substring keyword. Use "sqli" not "sql injection". Use "hello.txt" not "hello.txt was deleted".
-- time_window is ONE token: "24h", "7d", "30d", "1h". Default "24h".
-- min_level and limit are integers, not strings.
-- Omit args you don't need. Don't pass empty strings.
+- time_window: one token '24h', '7d', '30d'. Default '24h'
+- min_level and limit: integers, not strings. Never pass null
+- Omit args you don't need. Never pass empty strings
+- agent_name: exact agent name from the lab (Ubuntu-agent-web, srv-sql, srv-dns-bind, srv-ad-dns, srv-ftp, sentinel-fw)
 
-If a tool returns 0 results, broaden ONE filter (longer time_window OR shorter signature_contains) and retry once. After that, answer with what you found.
+CRITICAL TOPOLOGY RULE — port scans and network attacks:
+  Suricata runs on sentinel-fw (the gateway), NOT on victim hosts.
+  Port scans targeting a victim host are stored as alerts FROM sentinel-fw.
+  To find "what ports were scanned on Ubuntu-agent-web":
+    CORRECT: search_alerts(dst_ip="10.50.0.12", time_window="7d")
+    WRONG:   search_alerts(agent_name="Ubuntu-agent-web", rule_groups=["suricata"])
+  Host-to-IP mapping:
+    Ubuntu-agent-web = 10.50.0.12
+    srv-sql          = 10.50.0.13
+    srv-dns-bind     = 10.50.0.11
+    srv-ad-dns       = 10.50.0.10
+    srv-ftp          = 10.50.0.14
 
-Answer in plain text citing real timestamps, IPs, agents, and signatures. Never invent details.
+If a tool returns 0 results, broaden ONE filter and retry once. Then answer with what you found.
+Always cite real data: timestamps, IPs, agent names, rule IDs. Never invent details.
 """
 
 
-# ─── Main loop ───────────────────────────────────────────────────────
+# ── Response parsing helpers ──────────────────────────────────────────────────
 
+def _parse_tool_calls_openai(raw_tool_calls: List[Dict]) -> List[Tuple[str, str, dict]]:
+    """Parse OpenAI-format tool_calls into (call_id, name, args) tuples.
+
+    OpenAI tool_calls: [{id, type, function: {name, arguments (JSON string)}}]
+    """
+    parsed = []
+    for tc in raw_tool_calls or []:
+        fn = tc.get("function") or {}
+        call_id = tc.get("id", f"call_{int(time.time())}")
+        name = fn.get("name", "")
+        raw_args = fn.get("arguments") or "{}"
+        # arguments is a JSON string in OpenAI format
+        if isinstance(raw_args, str):
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                args = {}
+        else:
+            args = dict(raw_args)
+        parsed.append((call_id, name, args))
+    return parsed
+
+
+def _parse_tool_calls_ollama(raw_tool_calls: List[Dict]) -> List[Tuple[str, str, dict]]:
+    """Parse Ollama-format tool_calls into (call_id, name, args) tuples.
+
+    Ollama tool_calls: [{function: {name, arguments (already a dict)}}]
+    No id field — we generate one.
+    """
+    parsed = []
+    for i, tc in enumerate(raw_tool_calls or []):
+        fn = tc.get("function") or {}
+        call_id = f"ollama_{i}_{int(time.time())}"
+        name = fn.get("name", "")
+        raw_args = fn.get("arguments") or {}
+        if isinstance(raw_args, str):
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                args = {}
+        else:
+            args = dict(raw_args)
+        parsed.append((call_id, name, args))
+    return parsed
+
+
+def _execute_tool_calls(
+    parsed_calls: List[Tuple[str, str, dict]],
+) -> Tuple[List[Dict], List[Dict]]:
+    """Execute a list of parsed tool calls.
+
+    Returns:
+        tool_result_messages: list of {role, tool_call_id, content} for next API call
+        tool_calls_log: list of {name, args, result_summary, result} for UI
+    """
+    tool_result_messages = []
+    tool_calls_log = []
+
+    for call_id, name, args in parsed_calls:
+        tool_result = agent_tools.call_tool(name, args)
+
+        # Build UI summary
+        if isinstance(tool_result, dict):
+            if "alerts" in tool_result:
+                summary = f"{tool_result.get('returned', 0)}/{tool_result.get('total', 0)} alerts"
+            elif "signatures" in tool_result:
+                summary = f"{len(tool_result.get('signatures', []))} signatures"
+            elif "agents" in tool_result:
+                summary = f"{len(tool_result.get('agents', []))} agents"
+            elif "total" in tool_result:
+                summary = f"count={tool_result['total']}"
+            elif "error" in tool_result:
+                summary = f"error: {tool_result['error']}"
+            else:
+                summary = "ok"
+        else:
+            summary = "ok"
+
+        # Compact result for the model context
+        result_for_model = tool_result
+        if isinstance(tool_result, dict) and tool_result.get("alerts"):
+            result_for_model = {
+                "total":       tool_result.get("total"),
+                "returned":    tool_result.get("returned"),
+                "digest":      tool_result.get("digest"),
+                "sample_alerts": tool_result.get("alerts", [])[:10],
+            }
+            if "hint" in tool_result:
+                result_for_model["hint"] = tool_result["hint"]
+
+        content_str = json.dumps(result_for_model, default=str)
+        if len(content_str) > 8000:
+            content_str = content_str[:8000] + "...(truncated)"
+
+        # UI-friendly result (cap at 10 alerts)
+        result_for_ui = tool_result
+        if isinstance(tool_result, dict) and tool_result.get("alerts"):
+            result_for_ui = {
+                "total":       tool_result.get("total"),
+                "returned":    tool_result.get("returned"),
+                "digest":      tool_result.get("digest"),
+                "alerts":      tool_result.get("alerts", [])[:10],
+            }
+            if "hint" in tool_result:
+                result_for_ui["hint"] = tool_result["hint"]
+
+        tool_calls_log.append({
+            "name":           name,
+            "args":           args,
+            "result_summary": summary,
+            "result":         result_for_ui,
+        })
+
+        tool_result_messages.append({
+            "role":         "tool",
+            "tool_call_id": call_id,
+            "content":      content_str,
+        })
+
+    return tool_result_messages, tool_calls_log
+
+
+# ── Provider availability ─────────────────────────────────────────────────────
 
 def is_native_enabled(provider: str) -> bool:
-    """True only if user opted in AND the call is going to Ollama."""
-    if provider != "ollama":
-        return False
-    return os.getenv("OLLAMA_NATIVE_TOOLS", "false").lower() in ("1", "true", "yes")
+    """True when the given provider supports native function calling and it's enabled.
 
+    Cerebras and Groq are enabled by default (NATIVE_TOOLS_ENABLED=true).
+    Ollama requires explicit opt-in (OLLAMA_NATIVE_TOOLS=true).
+    """
+    if provider == "ollama":
+        return os.getenv("OLLAMA_NATIVE_TOOLS", "false").lower() in ("1", "true", "yes")
+    if provider == "cerebras":
+        enabled = os.getenv("NATIVE_TOOLS_ENABLED", "true").lower() in ("1", "true", "yes")
+        return enabled and bool(CEREBRAS_API_KEY)
+    if provider == "groq":
+        enabled = os.getenv("NATIVE_TOOLS_ENABLED", "true").lower() in ("1", "true", "yes")
+        return enabled and bool(GROQ_API_KEY)
+    if provider == "gemini":
+        enabled = os.getenv("NATIVE_TOOLS_ENABLED", "true").lower() in ("1", "true", "yes")
+        return enabled and bool(GEMINI_API_KEY)
+    return False
+
+
+# ── Main entrypoint ───────────────────────────────────────────────────────────
 
 def run_agentic_chat_native(
     question: str,
     seed_context: str,
     conversation_summary: str,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Ollama-native ReAct loop. Returns same shape as run_agentic_chat.
+    """Native function-calling ReAct loop. Routes to the correct provider.
 
-    Uses /api/chat with tools[] parameter. Mistral emits structured
-    tool_calls; we execute them and feed results back as 'tool' role
-    messages. Loop terminates when assistant message has no tool_calls
-    (i.e. final answer) or after MAX_ITERATIONS.
+    Returns same shape as agent_chat.run_agentic_chat:
+        {"answer": str, "tool_calls": [...], "iterations": int}
     """
+    # Build cascade order based on requested provider
+    if provider == "ollama":
+        return _run_ollama(question, seed_context, conversation_summary)
+
+    cascade = []
+    if provider == "cerebras":
+        cascade = ["cerebras", "groq", "gemini"]
+    elif provider == "groq":
+        cascade = ["groq", "cerebras", "gemini"]
+    elif provider == "gemini":
+        cascade = ["gemini", "cerebras", "groq"]
+    else:
+        if CEREBRAS_API_KEY and is_native_enabled("cerebras"):
+            cascade.append("cerebras")
+        if GROQ_API_KEY and is_native_enabled("groq"):
+            cascade.append("groq")
+        if GEMINI_API_KEY and is_native_enabled("gemini"):
+            cascade.append("gemini")
+
+    last_result = None
+    for p in cascade:
+        if p == "cerebras" and not CEREBRAS_API_KEY:
+            continue
+        if p == "groq" and not GROQ_API_KEY:
+            continue
+        if p == "gemini" and not GEMINI_API_KEY:
+            continue
+        result = _run_openai_compat(question, seed_context, conversation_summary, p)
+        last_result = result
+        # If not a rate-limit or API error, return immediately
+        answer = result.get("answer", "")
+        if "429" not in answer and "error calling" not in answer.lower():
+            return result
+        logger.warning("agent_chat_native.cascade_fallback from=%s reason=%s", p, answer[:80])
+
+    # All cloud providers rate-limited — return best error rather than hanging on Ollama
+    # Ollama is too slow (60-180s) for interactive SOC chat
+    if last_result:
+        last_result["answer"] = (
+            "All cloud providers are temporarily rate-limited. "
+            "Please wait 60 seconds and try again."
+        )
+        return last_result
+
+    return {"answer": "All providers unavailable.", "tool_calls": [], "iterations": 0}
+
+
+# ── OpenAI-compatible path (Cerebras + Groq) ──────────────────────────────────
+
+def _run_openai_compat(
+    question: str,
+    seed_context: str,
+    conversation_summary: str,
+    provider: str,
+) -> Dict[str, Any]:
+    """ReAct loop using OpenAI-compatible chat completions API.
+
+    Handles Cerebras (api.cerebras.ai) and Groq (api.groq.com).
+    Both accept identical payloads; only the endpoint URL and API key differ.
+    """
+    if provider == "cerebras":
+        api_url   = CEREBRAS_API_URL
+        api_key   = CEREBRAS_API_KEY
+        model     = CEREBRAS_MODEL
+    elif provider == "gemini":
+        api_url   = GEMINI_API_URL
+        api_key   = GEMINI_API_KEY
+        model     = GEMINI_MODEL
+    else:  # groq
+        api_url   = GROQ_API_URL
+        api_key   = GROQ_API_KEY
+        model     = GROQ_MODEL
+
+    tools_schema = _build_tools_schema()
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type":  "application/json",
+    }
+
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+    ]
+    if conversation_summary and conversation_summary.strip():
+        messages.append({
+            "role":    "system",
+            "content": f"Conversation context: {conversation_summary[:1500]}",
+        })
+    if seed_context and seed_context.strip():
+        messages.append({
+            "role":    "system",
+            "content": f"Seed context (sample, not authoritative): {seed_context[:1500]}",
+        })
+    messages.append({"role": "user", "content": question})
+
+    tool_calls_log: List[Dict[str, Any]] = []
+    iteration = 0
+
+    while iteration < MAX_ITERATIONS:
+        iteration += 1
+        try:
+            resp = requests.post(
+                api_url,
+                headers=headers,
+                json={
+                    "model":       model,
+                    "messages":    messages,
+                    "tools":       tools_schema,
+                    "tool_choice": "auto",
+                    "temperature": 0,
+                    "max_tokens":  4096,
+                },
+                timeout=HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            # Log response body for 4xx errors to aid debugging
+            body = ""
+            if hasattr(exc, "response") and exc.response is not None:
+                try:
+                    body = exc.response.text[:300]
+                except Exception:
+                    pass
+            logger.warning(
+                "agent_chat_native.%s_failed iter=%d: %s %s", provider, iteration, exc, body
+            )
+            return {
+                "answer":     f"I hit an error calling {provider}. ({exc})",
+                "tool_calls": tool_calls_log,
+                "iterations": iteration,
+                "error":      str(exc),
+            }
+
+        choice  = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        finish_reason = choice.get("finish_reason", "")
+
+        assistant_content = message.get("content") or ""
+        raw_tool_calls    = message.get("tool_calls") or []
+
+        logger.info(
+            "agent_chat_native.%s iter=%d finish_reason=%s tool_calls=%d content_len=%d",
+            provider, iteration, finish_reason, len(raw_tool_calls), len(assistant_content),
+        )
+
+        # No tool calls → final answer
+        if not raw_tool_calls or finish_reason == "stop":
+            return {
+                "answer":     assistant_content.strip() or "(empty response)",
+                "tool_calls": tool_calls_log,
+                "iterations": iteration,
+            }
+
+        # Append assistant message (with tool_calls list) before tool results
+        # OpenAI spec requires the assistant message to carry the tool_calls array
+        messages.append({
+            "role":       "assistant",
+            "content":    assistant_content,
+            "tool_calls": raw_tool_calls,
+        })
+
+        # Parse and execute tool calls
+        parsed = _parse_tool_calls_openai(raw_tool_calls)
+        tool_result_msgs, batch_log = _execute_tool_calls(parsed)
+        tool_calls_log.extend(batch_log)
+
+        # Append tool results — OpenAI format requires tool_call_id
+        messages.extend(tool_result_msgs)
+
+    # Hit MAX_ITERATIONS — force a final pass with no tools
+    messages.append({
+        "role":    "user",
+        "content": (
+            "You have reached the tool call limit. Provide a final answer "
+            "based on the data you have gathered. Do not call any more tools."
+        ),
+    })
+    try:
+        resp = requests.post(
+            api_url,
+            headers=headers,
+            json={
+                "model":       model,
+                "messages":    messages,
+                "temperature": 0,
+                "max_tokens":  2048,
+                # Deliberately omit tools so the model can't call any more
+            },
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data    = resp.json()
+        choice  = (data.get("choices") or [{}])[0]
+        answer  = (choice.get("message") or {}).get("content") or ""
+    except Exception as exc:
+        logger.warning("agent_chat_native.%s.final_pass_failed: %s", provider, exc)
+        answer = "I couldn't formulate a complete answer within the iteration limit."
+
+    return {
+        "answer":              answer.strip() or "I couldn't formulate a complete answer within the iteration limit.",
+        "tool_calls":          tool_calls_log,
+        "iterations":          iteration,
+        "hit_iteration_limit": True,
+    }
+
+
+# ── Ollama path (unchanged from original) ────────────────────────────────────
+
+def _run_ollama(
+    question: str,
+    seed_context: str,
+    conversation_summary: str,
+) -> Dict[str, Any]:
+    """Ollama-native ReAct loop. Identical to the original implementation."""
     tools_schema = _build_tools_schema()
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
     ]
     if conversation_summary and conversation_summary.strip():
-        messages.append({"role": "system", "content": f"Prior context: {conversation_summary}"})
+        messages.append({
+            "role":    "system",
+            "content": f"Prior context: {conversation_summary}",
+        })
     if seed_context and seed_context.strip():
-        messages.append({"role": "system", "content": f"Seed context (sample, not authoritative): {seed_context[:1500]}"})
+        messages.append({
+            "role":    "system",
+            "content": f"Seed context (sample, not authoritative): {seed_context[:1500]}",
+        })
     messages.append({"role": "user", "content": question})
 
     tool_calls_log: List[Dict[str, Any]] = []
@@ -207,11 +601,11 @@ def run_agentic_chat_native(
             resp = requests.post(
                 f"{OLLAMA_BASE_URL}/api/chat",
                 json={
-                    "model": OLLAMA_MODEL,
+                    "model":    OLLAMA_MODEL,
                     "messages": messages,
-                    "tools": tools_schema,
-                    "stream": False,
-                    "options": {"temperature": 0.2},
+                    "tools":    tools_schema,
+                    "stream":   False,
+                    "options":  {"temperature": 0},
                 },
                 timeout=HTTP_TIMEOUT,
             )
@@ -220,134 +614,70 @@ def run_agentic_chat_native(
         except Exception as exc:
             logger.warning("agent_chat_native.ollama_failed iter=%d: %s", iteration, exc)
             return {
-                "answer": f"I hit an internal error talking to the local model. ({exc})",
+                "answer":     f"I hit an error talking to the local model. ({exc})",
                 "tool_calls": tool_calls_log,
                 "iterations": iteration,
-                "error": str(exc),
+                "error":      str(exc),
             }
 
-        message = data.get("message") or {}
+        message         = data.get("message") or {}
         assistant_content = message.get("content", "") or ""
-        tool_calls = message.get("tool_calls") or []
+        raw_tool_calls  = message.get("tool_calls") or []
 
         logger.info(
-            "agent_chat_native.iter=%d tool_calls=%d content_len=%d",
-            iteration, len(tool_calls), len(assistant_content),
+            "agent_chat_native.ollama iter=%d tool_calls=%d content_len=%d",
+            iteration, len(raw_tool_calls), len(assistant_content),
         )
 
-        # No tool calls -> final answer
-        if not tool_calls:
+        if not raw_tool_calls:
             return {
-                "answer": assistant_content.strip() or "(empty response from local model)",
+                "answer":     assistant_content.strip() or "(empty response from local model)",
                 "tool_calls": tool_calls_log,
                 "iterations": iteration,
             }
 
-        # Append the assistant message before tool results (Ollama expects
-        # the conversation to be coherent)
         messages.append({
-            "role": "assistant",
-            "content": assistant_content,
-            "tool_calls": tool_calls,
+            "role":       "assistant",
+            "content":    assistant_content,
+            "tool_calls": raw_tool_calls,
         })
 
-        # Execute each tool call and append its result
-        for tc in tool_calls:
-            fn = tc.get("function") or {}
-            name = fn.get("name", "")
-            raw_args = fn.get("arguments") or {}
-            if isinstance(raw_args, str):
-                try:
-                    args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    args = {}
-            else:
-                args = dict(raw_args)
+        parsed = _parse_tool_calls_ollama(raw_tool_calls)
+        tool_result_msgs, batch_log = _execute_tool_calls(parsed)
+        tool_calls_log.extend(batch_log)
 
-            tool_result = agent_tools.call_tool(name, args)
-
-            # Build summary + UI-friendly result (same shape as agent_chat path)
-            if isinstance(tool_result, dict):
-                if "alerts" in tool_result:
-                    summary = f"{tool_result.get('returned', 0)}/{tool_result.get('total', 0)} alerts"
-                elif "signatures" in tool_result:
-                    summary = f"{len(tool_result.get('signatures', []))} signatures"
-                elif "agents" in tool_result:
-                    summary = f"{len(tool_result.get('agents', []))} agents"
-                elif "total" in tool_result:
-                    summary = f"count={tool_result['total']}"
-                elif "error" in tool_result:
-                    summary = f"error: {tool_result['error']}"
-                else:
-                    summary = "ok"
-            else:
-                summary = "ok"
-
-            result_for_ui = tool_result
-            if isinstance(tool_result, dict) and tool_result.get("alerts"):
-                result_for_ui = {
-                    "total": tool_result.get("total"),
-                    "returned": tool_result.get("returned"),
-                    "digest": tool_result.get("digest"),
-                    "alerts": tool_result.get("alerts", [])[:10],
-                }
-                if "hint" in tool_result:
-                    result_for_ui["hint"] = tool_result["hint"]
-
-            tool_calls_log.append({
-                "name": name,
-                "args": args,
-                "result_summary": summary,
-                "result": result_for_ui,
-            })
-
-            # Compress for the LLM context (same compaction as DSPy path)
-            if isinstance(tool_result, dict) and tool_result.get("alerts"):
-                compressed = {
-                    "total": tool_result.get("total"),
-                    "returned": tool_result.get("returned"),
-                    "digest": tool_result.get("digest"),
-                    "sample_alerts": tool_result.get("alerts", [])[:10],
-                }
-                if "hint" in tool_result:
-                    compressed["hint"] = tool_result["hint"]
-                content_for_model = json.dumps(compressed, default=str)
-            else:
-                content_for_model = json.dumps(tool_result, default=str)
-            if len(content_for_model) > 8000:
-                content_for_model = content_for_model[:8000] + "...(truncated)"
-
+        # Ollama tool result messages don't need tool_call_id
+        for msg in tool_result_msgs:
             messages.append({
-                "role": "tool",
-                "content": content_for_model,
+                "role":    "tool",
+                "content": msg["content"],
             })
 
-    # Hit iteration limit — force a final pass with no tools
+    # Hit iteration limit
     messages.append({
-        "role": "user",
-        "content": "You have reached the tool call limit. Please now give a final ANSWER based on the data you have gathered. Do not call any more tools.",
+        "role":    "user",
+        "content": "You have reached the tool call limit. Please give a final ANSWER based on the data you have gathered.",
     })
     try:
         resp = requests.post(
             f"{OLLAMA_BASE_URL}/api/chat",
             json={
-                "model": OLLAMA_MODEL,
+                "model":    OLLAMA_MODEL,
                 "messages": messages,
-                "stream": False,
-                "options": {"temperature": 0.2},
+                "stream":   False,
+                "options":  {"temperature": 0},
             },
             timeout=HTTP_TIMEOUT,
         )
         resp.raise_for_status()
-        data = resp.json()
-        answer = (data.get("message") or {}).get("content", "")
+        answer = (resp.json().get("message") or {}).get("content", "")
     except Exception as exc:
-        logger.warning("agent_chat_native.final_pass_failed: %s", exc)
+        logger.warning("agent_chat_native.ollama.final_pass_failed: %s", exc)
         answer = "I couldn't formulate a complete answer within the iteration limit."
 
     return {
-        "answer": answer.strip() or "I couldn't formulate a complete answer within the iteration limit.",
-        "tool_calls": tool_calls_log,
-        "iterations": iteration,
+        "answer":              answer.strip() or "I couldn't formulate a complete answer within the iteration limit.",
+        "tool_calls":          tool_calls_log,
+        "iterations":          iteration,
         "hit_iteration_limit": True,
     }

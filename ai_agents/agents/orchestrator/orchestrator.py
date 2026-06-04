@@ -22,11 +22,10 @@ SEVERITY_MAP = {
 
 class OrchestratorAgent:
     def __init__(self):
-        self.log_analyzer = LogAnalyzerAgent()
-        self.threat_intel = ThreatIntelAgent()
-        self.cve_scanner = CVEScannerAgent()
-        self.incident_responder = IncidentResponderAgent()
+        self.log_analyzer = LogAnalyzerAgent()     # kept for Phase 3 unknown-rule triage
         self.ansible_dispatch = AnsibleDispatchAgent()
+        # Retired: ThreatIntelAgent (no-op), CVEScannerAgent (replaced by tool),
+        # IncidentResponderAgent (redundant with chatbot reasoning)
 
     async def process_alert(self, alert: dict) -> dict:
         incident_id = str(uuid.uuid4())
@@ -74,26 +73,23 @@ class OrchestratorAgent:
         except Exception as e:
             logger.error("orchestrator.db.failed", incident_id=incident_id, error=str(e))
 
-        # Cache in Redis for fast API retrieval
-        get_redis().set(f"incident:{incident_id}", {
-            "incident_id": incident_id,
-            "alert_type": log_result.get("alert_type"),
-            "severity": log_result.get("severity"),
-            "summary": summary,
-            "analysis": ir_result.get("analysis"),
-            "mitre_techniques": log_result.get("mitre_techniques"),
-            "dispatch": dispatch_result,
-            "risk_score": ir_result.get("risk_score"),
-        })
+        # Cache minimal incident record (Phase 3: LLM analysis not yet wired)
+        try:
+            get_redis().set(f"incident:{incident_id}", {
+                "incident_id": incident_id,
+                "rule_id":     alert.get("rule", {}).get("id"),
+                "agent":       (alert.get("agent") or {}).get("name"),
+                "severity":    "medium",
+                "dispatch":    dispatch_result,
+                "fast_path":   False,
+                "phase":       "static_only_mode",
+            })
+        except Exception as redis_exc:
+            logger.error("orchestrator.redis.failed", incident_id=incident_id, error=str(redis_exc))
 
         return {
             "incident_id": incident_id,
-            "alert_type": log_result.get("alert_type"),
-            "severity": log_result.get("severity"),
-            "mitre_techniques": log_result.get("mitre_techniques"),
-            "summary": summary,
-            "analysis": ir_result.get("analysis"),
-            "risk_score": ir_result.get("risk_score"),
-            "dispatch": dispatch_result,
-            "cves_found": cve_result.get("total", 0),
+            "dispatch":    dispatch_result,
+            "fast_path":   False,
+            "phase":       "static_only_mode",
         }
