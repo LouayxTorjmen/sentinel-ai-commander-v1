@@ -6,7 +6,9 @@ with a live-queried, environment-variable-driven topology layer.
 
 Environment variables (add to .env):
   SENTINEL_MANAGEMENT_SUBNETS   Comma-separated CIDRs — never block (default: 10.60.0.0/24)
-  SENTINEL_ATTACKER_SUBNETS     Comma-separated CIDRs — known red-team ranges (default: 10.70.0.0/24)
+  SENTINEL_INTERNAL_SUBNETS     Comma-separated CIDRs — your org's networks (default: 10.50.0.0/24)
+  SENTINEL_ATTACKER_SUBNETS     Optional — known red-team ranges for lab use (default: 10.70.0.0/24)
+                                In production leave this empty — any non-internal IP is treated as external.
   SENTINEL_GATEWAY_AGENT        Agent name of the network gateway/Suricata sensor
                                 Auto-detected from agent names if not set.
   SENTINEL_WINDOWS_AGENTS       Comma-separated agent names that are Windows
@@ -71,14 +73,16 @@ class TopologyConfig:
 
     def __init__(self):
         self._mgmt_str     = os.getenv("SENTINEL_MANAGEMENT_SUBNETS", "10.60.0.0/24")
-        self._attack_str   = os.getenv("SENTINEL_ATTACKER_SUBNETS",   "10.70.0.0/24")
+        self._attack_str   = os.getenv("SENTINEL_ATTACKER_SUBNETS",   "10.70.0.0/24")  # lab only
+        self._internal_str = os.getenv("SENTINEL_INTERNAL_SUBNETS",  "10.50.0.0/24")   # org networks
         self._gw_agent_env = os.getenv("SENTINEL_GATEWAY_AGENT",      "").strip()
         self._win_env      = os.getenv("SENTINEL_WINDOWS_AGENTS",     "").strip()
         self._fw_redirect  = os.getenv("SENTINEL_FW_REDIRECT_TARGET", "").strip()
         self._cache_ttl    = float(os.getenv("SENTINEL_TOPOLOGY_CACHE_TTL", "300"))
 
-        self._mgmt_nets:   List[ipaddress.IPv4Network] = _parse_subnets(self._mgmt_str)
-        self._attack_nets: List[ipaddress.IPv4Network] = _parse_subnets(self._attack_str)
+        self._mgmt_nets:     List[ipaddress.IPv4Network] = _parse_subnets(self._mgmt_str)
+        self._attack_nets:   List[ipaddress.IPv4Network] = _parse_subnets(self._attack_str)
+        self._internal_nets: List[ipaddress.IPv4Network] = _parse_subnets(self._internal_str)
 
         # Wazuh agent list cache
         self._agents_cache: List[Dict] = []
@@ -91,12 +95,17 @@ class TopologyConfig:
         Classify an IP address by its network role.
 
         Returns one of:
-          'loopback'   — 127.0.0.1 / ::1
-          'management' — matches SENTINEL_MANAGEMENT_SUBNETS (never block)
-          'attacker'   — matches SENTINEL_ATTACKER_SUBNETS (known red-team)
-          'dmz'        — matches a known enrolled Wazuh agent IP
-          'external'   — public IP not in any known range
-          'unknown'    — could not parse
+          'loopback'    — 127.0.0.1 / ::1
+          'management'  — matches SENTINEL_MANAGEMENT_SUBNETS (never block)
+          'internal'    — matches SENTINEL_INTERNAL_SUBNETS or a known agent IP
+          'external'    — any IP not in management or internal ranges
+          'unknown'     — could not parse
+
+        NOTE: There is no hardcoded 'attacker' category. Any IP that is not
+        internal or management is treated as external and potentially hostile.
+        This is the correct model for real environments where attacker origin
+        is unknown in advance. SENTINEL_ATTACKER_SUBNETS is kept only as an
+        optional label for known red-team ranges in lab environments.
         """
         if not ip:
             return "unknown"
@@ -109,20 +118,47 @@ class TopologyConfig:
             return "loopback"
         if _ip_in_subnets(ip, self._mgmt_nets):
             return "management"
-        if _ip_in_subnets(ip, self._attack_nets):
-            return "attacker"
 
-        # Check against enrolled agent IPs
+        # Check internal subnets (org-owned networks)
+        if _ip_in_subnets(ip, self._internal_nets):
+            return "internal"
+
+        # Check against enrolled agent IPs (dynamically enrolled machines)
         for a in self._get_agents_cached():
             if a.get("ip") == ip:
-                return "dmz"
+                return "internal"
 
+        # Private RFC1918 but NOT in our internal subnets — unknown private device
+        # Could be: rogue device, misconfigured VPN, isolated attacker VLAN (lab)
+        # Not safe to assume it is ours — treat as suspicious
+        if addr.is_private:
+            return "private_unknown"
+
+        # Publicly routable IP — queryable in AbuseIPDB/GreyNoise
         return "external"
 
+    def is_external(self, ip: str) -> bool:
+        """True for any IP not in management or internal subnets."""
+        return self.classify_ip(ip) == "external"
+
+    def is_public_ip(self, ip: str) -> bool:
+        """True if IP is routable on the public internet (not RFC1918/loopback/reserved)."""
+        try:
+            addr = ipaddress.ip_address(ip)
+            return (
+                not addr.is_private
+                and not addr.is_loopback
+                and not addr.is_reserved
+                and not addr.is_link_local
+                and not addr.is_multicast
+            )
+        except ValueError:
+            return False
+
     def is_safe_to_block(self, ip: str) -> bool:
-        """False for IPs that must never be blocked (loopback, management)."""
+        """False for IPs that must never be blocked (loopback, management, internal infrastructure)."""
         c = self.classify_ip(ip)
-        return c not in ("loopback", "management", "unknown")
+        return c not in ("loopback", "management", "internal", "unknown")
 
     # ── Agent resolution ──────────────────────────────────────────────────────
 

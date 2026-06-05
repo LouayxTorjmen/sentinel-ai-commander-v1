@@ -152,10 +152,16 @@ class OrchestratorAgent:
             alert, rule_id, agent_name, src_ip
         )
 
-        # ── Step 2: Build prompt ─────────────────────────────────────────────
-        prompt = self._build_phase3_prompt(alert, rule_id, agent_name, src_ip, contexts)
+        # ── Step 2: Enrich source IP with external threat intel ──────────────
+        # Only fires for public IPs — private IPs return immediately with no API call
+        threat_intel_str = await _enrich_src_ip(src_ip) if src_ip else ""
 
-        # ── Step 3: LLM call ─────────────────────────────────────────────────
+        # ── Step 3: Build prompt ──────────────────────────────────────────────
+        prompt = self._build_phase3_prompt(
+            alert, rule_id, agent_name, src_ip, contexts, threat_intel_str
+        )
+
+        # ── Step 4: LLM call ─────────────────────────────────────────────────
         decision = await _llm_decide(prompt)
         if decision is None:
             logger.warning("orchestrator.phase3.llm_failed",
@@ -174,7 +180,7 @@ class OrchestratorAgent:
                     attributed_ip=decision.get("attributed_src_ip", ""),
                     reasoning=decision.get("reasoning", "")[:120])
 
-        # ── Step 4: Validate ─────────────────────────────────────────────────
+        # ── Step 5: Validate ─────────────────────────────────────────────────
         action     = decision.get("action", "no_action")
         confidence = float(decision.get("confidence", 0.0))
         target     = decision.get("target_host", agent_name) or agent_name
@@ -224,7 +230,7 @@ class OrchestratorAgent:
                                 "would_run": action, "on": target},
             }
 
-        # ── Step 5: Execute ───────────────────────────────────────────────────
+        # ── Step 6: Execute ───────────────────────────────────────────────────
         extra_vars = extract_vars_from_alert(alert)
         extra_vars.update({
             "incident_id":  incident_id,
@@ -365,6 +371,7 @@ class OrchestratorAgent:
         agent_name: str,
         src_ip: str,
         contexts: dict,
+        threat_intel: str = "",
     ) -> str:
         topo        = get_topology()
         rule_desc   = alert.get("rule", {}).get("description", "")
@@ -467,6 +474,7 @@ TRIGGERING ALERT:
   Groups       : {rule_groups}
   Agent        : {agent_name}
   Source IP    : {src_ip or '(none — host-based detection)'}
+{threat_intel}
 
 {topology_str}
 
@@ -521,6 +529,56 @@ def _extract_src_ip(alert: dict) -> str:
         data.get("srcip") or data.get("src_ip")
         or win.get("ipAddress") or win.get("ipaddress") or ""
     )
+
+
+async def _enrich_src_ip(ip: str) -> str:
+    """
+    Enrich a source IP with external threat intelligence.
+    Returns a formatted string for inclusion in the LLM prompt.
+    Only queries external APIs for public IPs — private IPs return immediately.
+    """
+    if not ip:
+        return ""
+    from ai_agents.rag.agent_tools import enrich_ioc
+    try:
+        result = enrich_ioc(ip=ip)
+        ip_intel = result.get("ip_intel", {})
+
+        if ip_intel.get("skipped"):
+            return f"THREAT INTEL: {ip} is a private/internal IP — no external data available."
+
+        verdict = ip_intel.get("verdict", "UNKNOWN")
+        abuse   = ip_intel.get("abuse_score", 0)
+        sources = ip_intel.get("sources", [])
+
+        lines = [f"THREAT INTEL for {ip} (verdict: {verdict}, abuse_score: {abuse}%)"]
+
+        abuseipdb = ip_intel.get("abuseipdb", {})
+        if abuseipdb and not abuseipdb.get("skipped") and not abuseipdb.get("error"):
+            lines.append(
+                f"  AbuseIPDB: {abuse}% confidence malicious | "
+                f"reports={abuseipdb.get('total_reports',0)} | "
+                f"country={abuseipdb.get('country','?')} | "
+                f"isp={abuseipdb.get('isp','?')} | "
+                f"tor={abuseipdb.get('is_tor',False)}"
+            )
+
+        gn = ip_intel.get("greynoise", {})
+        if gn and not gn.get("skipped") and not gn.get("error"):
+            lines.append(
+                f"  GreyNoise: noise={gn.get('noise',False)} | "
+                f"riot={gn.get('riot',False)} | "
+                f"classification={gn.get('classification','?')} | "
+                f"name={gn.get('name','?')}"
+            )
+
+        if not sources:
+            lines.append("  (No API keys configured — set ABUSEIPDB_API_KEY and/or GREYNOISE_API_KEY)")
+
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("orchestrator.enrich_failed ip=%s error=%s", ip, exc)
+        return ""
 
 
 async def _llm_decide(prompt: str) -> Optional[Dict[str, Any]]:
