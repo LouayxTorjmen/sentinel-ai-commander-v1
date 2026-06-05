@@ -64,6 +64,110 @@ env_get() {
     grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" | head -1
 }
 
+
+# ── Step 0: Platform detection and validation ─────────────────────────────────
+check_platform() {
+    step "Checking platform"
+    local warnings=0
+    IS_WSL=false; IS_CONTAINER=false; IS_LINUX=false
+
+    if grep -qi microsoft /proc/version 2>/dev/null || \
+       grep -qi wsl /proc/version 2>/dev/null; then
+        IS_WSL=true
+        ok "Platform: Windows Subsystem for Linux 2 (WSL2)"
+    elif [ -f /.dockerenv ] || grep -q "docker\|containerd\|lxc" /proc/1/cgroup 2>/dev/null; then
+        IS_CONTAINER=true
+        warn "Platform: Running inside a container — Docker-in-Docker not officially supported"
+    elif uname -s | grep -qi linux; then
+        IS_LINUX=true
+        ok "Platform: Linux ($(uname -r | cut -d- -f1))"
+    else
+        fail "Unsupported platform: $(uname -s). SENTINEL-AI requires Linux or WSL2."
+    fi
+
+    if [ "$IS_WSL" = true ]; then
+        [ -f /proc/sys/fs/binfmt_misc/WSLInterop ] && ok "WSL2 kernel confirmed" || \
+            warn "Could not confirm WSL2 — WSL1 is not supported"
+
+        if echo "$ROOT" | grep -q "^/mnt/[a-z]/"; then
+            echo ""
+            echo -e "${R}${B}  CRITICAL: Repo is on the Windows filesystem (${ROOT})${RST}"
+            echo -e "${R}  This causes Docker volume mount failures and severe I/O slowness.${RST}"
+            echo -e "${R}  Move the repo to the WSL2 filesystem:${RST}"
+            echo -e "  ${Y}cp -r ${ROOT} ~/sentinel-ai-commander${RST}"
+            echo -e "  ${Y}cd ~/sentinel-ai-commander && ./setup.sh${RST}"
+            echo ""
+            fail "Move repo to WSL2 filesystem and re-run setup.sh"
+        fi
+        ok "Repo location: ${ROOT}"
+
+        local mem_kb mem_gb
+        mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        mem_gb=$(( mem_kb / 1024 / 1024 ))
+        if [ "$mem_gb" -lt 6 ]; then
+            warn "WSL2 has only ${mem_gb}GB RAM — Wazuh needs at least 6GB"
+            warn "Add to C:\\Users\\YourName\\.wslconfig:"
+            info "  [wsl2]"
+            info "  memory=12GB"
+            info "  processors=4"
+            info "Then: wsl --shutdown  (from PowerShell), then reopen terminal"
+            warnings=$((warnings + 1))
+        else
+            ok "WSL2 memory: ${mem_gb}GB"
+        fi
+    fi
+
+    local mem_kb mem_gb
+    mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+    mem_gb=$(( mem_kb / 1024 / 1024 ))
+    if [ "$mem_gb" -lt 6 ]; then
+        warn "${mem_gb}GB RAM — minimum 8GB recommended (Wazuh indexer needs 4GB alone)"
+        warnings=$((warnings + 1))
+    elif [ "$mem_gb" -lt 10 ]; then
+        warn "RAM: ${mem_gb}GB — 16GB recommended for stable production use"
+    else
+        ok "RAM: ${mem_gb}GB"
+    fi
+
+    local free_gb
+    free_gb=$(df -BG "$ROOT" 2>/dev/null | tail -1 | awk '{print $4}' | tr -d 'G' || echo 0)
+    if [ "$free_gb" -lt 20 ]; then
+        warn "Only ${free_gb}GB free disk — minimum 50GB recommended"
+        warnings=$((warnings + 1))
+    else
+        ok "Disk: ${free_gb}GB free"
+    fi
+
+    curl -s --max-time 5 https://hub.docker.com >/dev/null 2>&1 \
+        && ok "Internet: Docker Hub reachable" \
+        || { warn "Cannot reach Docker Hub — image pulls will fail"; warnings=$((warnings + 1)); }
+
+    if [ "$(id -u)" = "0" ]; then
+        ok "Running as root"
+    elif sudo -n true 2>/dev/null; then
+        ok "sudo access confirmed"
+    else
+        warn "Not root and sudo requires a password — some steps may prompt for it"
+    fi
+
+    case "$(uname -m)" in
+        x86_64|amd64)  ok  "Architecture: x86_64" ;;
+        aarch64|arm64) warn "Architecture: ARM64 — Wazuh may be unstable on ARM"
+                       warnings=$((warnings + 1)) ;;
+        *)             fail "Unsupported CPU architecture: $(uname -m)" ;;
+    esac
+
+    echo ""
+    if [ $warnings -gt 0 ]; then
+        warn "$warnings warning(s) above — review before continuing"
+        echo ""
+        read -rp "  Continue anyway? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || fail "Setup aborted by user"
+    else
+        ok "Platform checks passed"
+    fi
+}
+
 # ── Step 1: Detect OS ─────────────────────────────────────────────────────────
 detect_os() {
     if [ -f /etc/os-release ]; then
