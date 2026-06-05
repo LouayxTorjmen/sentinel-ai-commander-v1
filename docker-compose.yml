@@ -188,7 +188,7 @@ services:
     volumes:
       - suricata-logs:/var/log/suricata:ro
       - ml-models:/models
-      - /root/sentinel-ai-commander/ansible:/ansible
+      - ${SENTINEL_BASE_DIR:-/root/sentinel-ai-commander}/ansible:/ansible
       - sentinel_wazuh-manager-logs:/var/ossec/logs
     depends_on:
       postgres: { condition: service_healthy }
@@ -227,6 +227,6 @@ services:
       - RUNNER_API_BIN=/app/runner_api.py
       - RUNNER_WORKDIR=/app
     volumes:
-      - /root/sentinel-ai-commander/ansible:/ansible
-      - /root/sentinel-ai-commander/scripts/inventory_watcher_entrypoint.sh:/usr/local/bin/sentinel_entrypoint.sh:ro
+      - ${SENTINEL_BASE_DIR:-/root/sentinel-ai-commander}/ansible:/ansible
+      - ${SENTINEL_BASE_DIR:-/root/sentinel-ai-commander}/scripts/inventory_watcher_entrypoint.sh:/usr/local/bin/sentinel_entrypoint.sh:ro
     entrypoint: ["/bin/bash", "/usr/local/bin/sentinel_entrypoint.sh"]

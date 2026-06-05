@@ -34,7 +34,7 @@ def _load_env_file():
         os.environ.get("SENTINEL_ENV"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
         os.path.expanduser("~/sentinel-ai-commander/.env"),
-        "/root/sentinel-ai-commander/.env",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
     ]
     env_file = next((p for p in candidates if p and os.path.isfile(p)), None)
     if not env_file:

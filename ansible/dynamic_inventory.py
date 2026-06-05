@@ -189,7 +189,7 @@ def render_inventory(agents: list[dict]) -> str:
     # Per-host blocks - one section per OS family with proper connection vars
     lines.append("[linux_agents]")
     # Agents that need password auth instead of key auth
-    LINUX_PASSWORD_AGENTS = set(os.getenv("LINUX_PASSWORD_AGENTS", "srv-dns-bind").split(",")) - {""}
+    LINUX_PASSWORD_AGENTS = set(os.getenv("LINUX_PASSWORD_AGENTS", "").split(",")) - {""}
 
     for name, ip in sorted(linux_active):
         if name in LINUX_PASSWORD_AGENTS:

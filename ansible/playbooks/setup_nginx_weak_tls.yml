@@ -22,14 +22,14 @@
 #      - The backup /etc/ssl/openssl.cnf.sentinel-backup allows exact restore
 # =============================================================================
 - name: "SENTINEL-AI — Scenario Setup: nginx Weak TLS baseline v5"
-  hosts: "{{ target_hosts | default('Ubuntu-agent-web') }}"
+  hosts: "{{ target_hosts }}"  # target_hosts MUST be passed — no default (enterprise-portable)
   gather_facts: yes
   become: true
 
   vars:
     web_root:       /var/www/sentinel-weak-tls
     cert_dir:       /etc/nginx/sentinel-tls
-    cert_cn:        "srv-web.mydomain.com"
+    cert_cn:        "{{ cert_cn | default(ansible_fqdn | default(inventory_hostname)) }}"
     vhost_path:     /etc/nginx/sites-available/sentinel-weak-tls.conf
     vhost_link:     /etc/nginx/sites-enabled/sentinel-weak-tls.conf
     system_ssl_cnf: /etc/ssl/openssl.cnf

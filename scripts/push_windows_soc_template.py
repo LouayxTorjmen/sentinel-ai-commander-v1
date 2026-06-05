@@ -27,13 +27,38 @@ for line in (REPO / ".env").read_text().splitlines():
     if "=" in line and not line.strip().startswith("#"):
         k, _, v = line.partition("=")
         ENV[k.strip()] = v.strip()
+# Load Windows agents dynamically from Wazuh instead of hardcoding them
+import requests as _req, os as _os, urllib3 as _u3
+_u3.disable_warnings()
+def _get_windows_agents():
+    url  = _os.getenv("WAZUH_API_URL", "https://localhost:55000")
+    user = _os.getenv("WAZUH_API_USER", "wazuh-wui")
+    pwd  = _os.getenv("WAZUH_API_PASSWORD", "")
+    windows_names = set(_os.getenv("SENTINEL_WINDOWS_AGENTS", "").split(",")) - {""}
+    try:
+        tok = _req.post(f"{url}/security/user/authenticate",
+                        auth=(user, pwd), verify=False, timeout=10)
+        tok.raise_for_status()
+        token = tok.json()["data"]["token"]
+        data  = _req.get(f"{url}/agents", headers={"Authorization": f"Bearer {token}"},
+                         params={"limit": 500}, verify=False, timeout=10)
+        agents = data.json().get("data", {}).get("affected_items", [])
+        return [
+            {"name": a["name"], "ip": a.get("ip",""), "user": "Administrator"}
+            for a in agents
+            if a.get("name") in windows_names or
+               (a.get("os", {}) or {}).get("platform","").lower() == "windows"
+        ]
+    except Exception as e:
+        print(f"Warning: could not load agents from Wazuh: {e}")
+        return []
+WINDOWS_AGENTS = _get_windows_agents()
+
 MANAGER_IP = ENV.get("WAZUH_MANAGER_EXTERNAL_IP") or ENV.get("WAZUH_MANAGER_IP") or "172.31.70.13"
 MANAGER_PORT = ENV.get("PORT_WAZUH_AGENT_COMM_TCP") or "50041"
 
 AGENTS = [
-    {"name": "Win10-agent",         "ip": "192.168.49.136", "user": "Louay"},
-    {"name": "Win11-agent-2",       "ip": "192.168.49.137", "user": "louaytorjmen"},
-    {"name": "WinServer2019-agent", "ip": "192.168.49.138", "user": "Administrator"},
+# see WINDOWS_AGENTS loaded above
 ]
 
 G = "\033[92m"; R = "\033[91m"; Y = "\033[93m"; C = "\033[96m"; DIM = "\033[2m"; RST = "\033[0m"

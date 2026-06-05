@@ -1,6 +1,6 @@
 ---
 - name: SENTINEL-AI — Windows FTP Brute Force Response
-  hosts: "{{ target_hosts | default('srv-ftp') }}"
+  hosts: "{{ target_hosts }}"  # target_hosts MUST be passed — no default (enterprise-portable)
   gather_facts: yes
   become: false
   roles:

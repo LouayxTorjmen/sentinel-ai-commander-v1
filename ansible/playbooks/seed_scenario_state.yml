@@ -1,4 +1,18 @@
 ---
+# =============================================================================
+# SENTINEL-AI — Scenario Seed Playbook
+# =============================================================================
+# WARNING: The credentials, IP addresses, and usernames in this file are
+# INTENTIONAL SCENARIO FIXTURE DATA. They represent the fake credentials
+# that populate the infra_credentials MySQL table — the data the attacker
+# is supposed to find during the attack simulation.
+#
+# DO NOT replace these with environment variables. DO NOT remove them.
+# They are the scenario, not infrastructure configuration.
+#
+# The deliberately weak credentials (Louay2002, louay, etc.) exist because
+# this playbook seeds a vulnerable lab environment for thesis demonstration.
+# =============================================================================
 # ─────────────────────────────────────────────────────────────────────
 # SENTINEL-AI :: Attack scenario lab state seeder
 # ─────────────────────────────────────────────────────────────────────

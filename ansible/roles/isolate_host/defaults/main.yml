@@ -2,6 +2,6 @@
 isolate_host_ip: ""
 isolate_host_comment: "SENTINEL-AI isolate"
 management_ips:
-  - "172.31.70.13"     # Wazuh manager
-  - "192.168.49.1"     # SOC admin
+  - "{{ wazuh_manager_ip | default(lookup('env', 'WAZUH_MANAGER_IP') | default('172.31.70.13')) }}"  # Wazuh manager
+  - "{{ soc_admin_ip | default(lookup('env', 'SOC_ADMIN_IP') | default('192.168.49.1')) }}"  # SOC admin
 dry_run: false

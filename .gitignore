@@ -125,3 +125,6 @@ docker-compose.yml.bak*
 wazuh/docker-compose.yml.bak*
 .env.bak*
 .env.bak_*
+ansible/artifacts/*/
+ansible/artifacts/*/
+!ansible/artifacts/.gitkeep

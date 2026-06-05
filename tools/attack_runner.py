@@ -45,8 +45,8 @@ WAZUH_API_URL = "https://localhost:50001"
 WAZUH_INDEXER_URL = "https://localhost:50002"
 AI_AGENTS_URL = "http://localhost:50010"
 
-OUTPUT_DIR = Path("/mnt/d/wazuh_project/attack_runs")
-RESULTS_PATH = Path("/mnt/d/wazuh_project/attack_runner_results.json")
+OUTPUT_DIR   = Path(os.getenv("SENTINEL_OUTPUT_DIR", str(Path.home() / "sentinel_output" / "attack_runs")))
+RESULTS_PATH = Path(os.getenv("SENTINEL_OUTPUT_DIR", str(Path.home() / "sentinel_output"))) / "attack_runner_results.json"
 
 
 class C:
