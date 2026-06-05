@@ -618,6 +618,7 @@ main() {
             ;;
     esac
 
+    check_platform
     install_prerequisites
     setup_env
     setup_ssh_keys
