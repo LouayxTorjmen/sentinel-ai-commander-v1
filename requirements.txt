@@ -57,3 +57,4 @@ cryptography>=41.0.0
 
 # Used by jq-style queries inside ansible playbooks (common Ansible idiom)
 jmespath>=1.0.1
+fastmcp>=2.0.0

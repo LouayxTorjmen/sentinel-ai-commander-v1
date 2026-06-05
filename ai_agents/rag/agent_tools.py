@@ -1925,154 +1925,202 @@ def enrich_ioc(
 ) -> Dict[str, Any]:
     """Enrich an Indicator of Compromise (IOC) with external threat intelligence.
 
-    Queries AbuseIPDB and GreyNoise for IP reputation data.
-    Only works for PUBLIC IPs — private/internal IPs are skipped automatically.
+    Queries multiple threat intelligence sources in parallel with per-source timeouts:
+      - VirusTotal (70+ AV engines)
+      - AbuseIPDB (IP reputation, abuse confidence score)
+      - AlienVault OTX (community threat feeds) — 10s timeout, skipped if slow
+      - IPinfo (geolocation, ASN)
 
-    Use when:
-      - An external IP appeared in an alert and you want its reputation
-      - You want to know if an IP is a known scanner, attacker, or legitimate service
-      - The source IP is not in your internal network ranges
+    Only works for PUBLIC IPs — private/internal addresses are skipped immediately.
 
-    ip: public IP address to check (e.g. '185.220.101.42')
-    file_hash: MD5/SHA256 hash of a suspicious file (not yet implemented)
-    domain: suspicious domain name (not yet implemented)
+    ip: IP address to enrich (public IPs only)
+    file_hash: MD5 or SHA256 hash to look up in VirusTotal
+    domain: domain name to check
     """
+    import ipaddress as _ipa
     import os as _os
     import requests as _req
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TimeoutError, as_completed
 
     results: Dict[str, Any] = {"ip": ip, "hash": file_hash, "domain": domain}
 
-    # ── IP enrichment ─────────────────────────────────────────────────────────
+    if not (ip or file_hash or domain):
+        return {"error": "Provide at least one of: ip, file_hash, domain"}
+
+    # ── Private IP check ──────────────────────────────────────────────────────
     if ip:
-        # Check if the IP is public — private IPs have no external reputation data
         try:
-            addr = _ipaddress.ip_address(ip)
+            addr = _ipa.ip_address(ip)
             is_public = (
-                not addr.is_private
-                and not addr.is_loopback
-                and not addr.is_reserved
-                and not addr.is_link_local
+                not addr.is_private and not addr.is_loopback
+                and not addr.is_reserved and not addr.is_link_local
                 and not addr.is_multicast
             )
         except ValueError:
             return {"error": f"Invalid IP address: {ip}"}
 
         if not is_public:
-            results["ip_intel"] = {
-                "skipped": True,
-                "reason": (
-                    f"{ip} is a private RFC1918 address — "
-                    "AbuseIPDB and GreyNoise only track publicly routable IPs. "
-                    "No external threat intelligence is available for this address."
-                ),
-                "classification": "private",
+            return {
+                "ip": ip,
+                "ip_intel": {
+                    "skipped": True,
+                    "reason": f"{ip} is a private/internal address — "
+                              "no external threat intelligence available for RFC1918 ranges.",
+                    "classification": "internal",
+                },
             }
-        else:
-            ip_intel: Dict[str, Any] = {"ip": ip, "sources": []}
 
-            # AbuseIPDB
-            abuseipdb_key = _os.getenv("ABUSEIPDB_API_KEY", "")
-            if abuseipdb_key:
-                try:
-                    resp = _req.get(
-                        "https://api.abuseipdb.com/api/v2/check",
-                        headers={"Key": abuseipdb_key, "Accept": "application/json"},
-                        params={"ipAddress": ip, "maxAgeInDays": 90, "verbose": True},
-                        timeout=10,
-                    )
-                    if resp.status_code == 200:
-                        d = resp.json().get("data", {})
-                        ip_intel["abuseipdb"] = {
-                            "abuse_confidence_score": d.get("abuseConfidenceScore"),
-                            "total_reports":          d.get("totalReports"),
-                            "country":                d.get("countryCode"),
-                            "isp":                    d.get("isp"),
-                            "usage_type":             d.get("usageType"),
-                            "domain":                 d.get("domain"),
-                            "is_tor":                 d.get("isTor"),
-                            "last_reported":          d.get("lastReportedAt"),
-                            "categories":             list(set(
-                                cat
-                                for r in (d.get("reports") or [])
-                                for cat in (r.get("categories") or [])
-                            ))[:10],
-                        }
-                        ip_intel["sources"].append("abuseipdb")
-                    elif resp.status_code == 429:
-                        ip_intel["abuseipdb"] = {"error": "rate_limited"}
-                    else:
-                        ip_intel["abuseipdb"] = {"error": f"HTTP {resp.status_code}"}
-                except Exception as exc:
-                    ip_intel["abuseipdb"] = {"error": str(exc)[:100]}
-            else:
-                ip_intel["abuseipdb"] = {"skipped": True, "reason": "ABUSEIPDB_API_KEY not set"}
+    # ── API keys ──────────────────────────────────────────────────────────────
+    VT_KEY        = _os.getenv("VIRUSTOTAL_API_KEY", "")
+    ABUSE_KEY     = _os.getenv("ABUSEIPDB_API_KEY", "")
+    OTX_KEY       = _os.getenv("OTX_API_KEY", "")
+    IPINFO_TOKEN  = _os.getenv("IPINFO_TOKEN", "")
 
-            # GreyNoise community API (free tier)
-            greynoise_key = _os.getenv("GREYNOISE_API_KEY", "")
-            if greynoise_key:
-                try:
-                    resp = _req.get(
-                        f"https://api.greynoise.io/v3/community/{ip}",
-                        headers={"key": greynoise_key},
-                        timeout=10,
-                    )
-                    if resp.status_code == 200:
-                        d = resp.json()
-                        ip_intel["greynoise"] = {
-                            "noise":          d.get("noise"),
-                            "riot":           d.get("riot"),
-                            "classification": d.get("classification"),
-                            "name":           d.get("name"),
-                            "last_seen":      d.get("last_seen"),
-                            "message":        d.get("message"),
-                        }
-                        ip_intel["sources"].append("greynoise")
-                    elif resp.status_code == 404:
-                        ip_intel["greynoise"] = {"classification": "unknown", "noise": False, "riot": False}
-                    elif resp.status_code == 429:
-                        ip_intel["greynoise"] = {"error": "rate_limited"}
-                    else:
-                        ip_intel["greynoise"] = {"error": f"HTTP {resp.status_code}"}
-                except Exception as exc:
-                    ip_intel["greynoise"] = {"error": str(exc)[:100]}
-            else:
-                ip_intel["greynoise"] = {"skipped": True, "reason": "GREYNOISE_API_KEY not set"}
+    ioc_value = ip or file_hash or domain
+    ip_intel: Dict[str, Any] = {"ip": ioc_value, "sources": []}
 
-            # Summary verdict
-            abuse_score = (ip_intel.get("abuseipdb") or {}).get("abuse_confidence_score", 0) or 0
-            is_noise    = (ip_intel.get("greynoise") or {}).get("noise", False)
-            is_riot     = (ip_intel.get("greynoise") or {}).get("riot", False)
+    # ── Per-source query functions ─────────────────────────────────────────────
+    def query_virustotal():
+        if not VT_KEY:
+            return "virustotal", {"skipped": True, "reason": "VIRUSTOTAL_API_KEY not set"}
+        try:
+            r = _req.get(
+                f"https://www.virustotal.com/api/v3/ip_addresses/{ioc_value}",
+                headers={"x-apikey": VT_KEY},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                d = r.json().get("data", {}).get("attributes", {})
+                stats = d.get("last_analysis_stats", {})
+                return "virustotal", {
+                    "malicious":   stats.get("malicious", 0),
+                    "suspicious":  stats.get("suspicious", 0),
+                    "harmless":    stats.get("harmless", 0),
+                    "total":       sum(stats.values()),
+                    "reputation":  d.get("reputation", 0),
+                    "country":     d.get("country", ""),
+                    "asn":         d.get("asn", ""),
+                    "as_owner":    d.get("as_owner", ""),
+                }
+            return "virustotal", {"error": f"HTTP {r.status_code}"}
+        except Exception as e:
+            return "virustotal", {"error": str(e)[:80]}
 
-            if abuse_score >= 80:
-                verdict = "MALICIOUS"
-            elif abuse_score >= 25 or is_noise:
-                verdict = "SUSPICIOUS"
-            elif is_riot:
-                verdict = "LEGITIMATE_SERVICE"
-            elif not ip_intel["sources"]:
-                verdict = "UNKNOWN (no API keys configured)"
-            else:
-                verdict = "CLEAN"
+    def query_abuseipdb():
+        if not ABUSE_KEY:
+            return "abuseipdb", {"skipped": True, "reason": "ABUSEIPDB_API_KEY not set"}
+        try:
+            r = _req.get(
+                "https://api.abuseipdb.com/api/v2/check",
+                headers={"Key": ABUSE_KEY, "Accept": "application/json"},
+                params={"ipAddress": ioc_value, "maxAgeInDays": 90},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                d = r.json().get("data", {})
+                return "abuseipdb", {
+                    "abuse_confidence_score": d.get("abuseConfidenceScore", 0),
+                    "total_reports":          d.get("totalReports", 0),
+                    "country":                d.get("countryCode", ""),
+                    "isp":                    d.get("isp", ""),
+                    "usage_type":             d.get("usageType", ""),
+                    "is_tor":                 d.get("isTor", False),
+                    "domain":                 d.get("domain", ""),
+                }
+            return "abuseipdb", {"error": f"HTTP {r.status_code}"}
+        except Exception as e:
+            return "abuseipdb", {"error": str(e)[:80]}
 
-            ip_intel["verdict"] = verdict
-            ip_intel["abuse_score"] = abuse_score
-            results["ip_intel"] = ip_intel
+    def query_otx():
+        if not OTX_KEY:
+            return "otx", {"skipped": True, "reason": "OTX_API_KEY not set"}
+        try:
+            r = _req.get(
+                f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ioc_value}/general",
+                headers={"X-OTX-API-KEY": OTX_KEY},
+                timeout=10,   # hard 10s per-request timeout
+            )
+            if r.status_code == 200:
+                d = r.json()
+                pulse_count = d.get("pulse_info", {}).get("count", 0)
+                return "otx", {
+                    "pulse_count":      pulse_count,
+                    "reputation":       d.get("reputation", 0),
+                    "asn":              d.get("asn", ""),
+                    "country":          d.get("country_name", ""),
+                    "malware_families": d.get("pulse_info", {}).get("related", {})
+                                         .get("alienvault", {}).get("malware_families", [])[:5],
+                }
+            return "otx", {"error": f"HTTP {r.status_code}"}
+        except Exception as e:
+            return "otx", {"skipped": True, "reason": f"timeout or error: {str(e)[:60]}"}
 
-    # ── Hash enrichment (placeholder) ─────────────────────────────────────────
-    if file_hash:
-        results["hash_intel"] = {
-            "skipped": True,
-            "reason": "Hash enrichment not yet implemented — configure VirusTotal API key",
-        }
+    def query_ipinfo():
+        if not IPINFO_TOKEN:
+            return "ipinfo", {"skipped": True, "reason": "IPINFO_TOKEN not set"}
+        try:
+            r = _req.get(
+                f"https://ipinfo.io/lite/{ioc_value}",
+                headers={"Authorization": f"Bearer {IPINFO_TOKEN}"},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                d = r.json()
+                return "ipinfo", {
+                    "city":     d.get("city", ""),
+                    "region":   d.get("region", ""),
+                    "country":  d.get("country", ""),
+                    "org":      d.get("org", ""),
+                    "hostname": d.get("hostname", ""),
+                }
+            return "ipinfo", {"error": f"HTTP {r.status_code}"}
+        except Exception as e:
+            return "ipinfo", {"error": str(e)[:80]}
 
-    # ── Domain enrichment (placeholder) ───────────────────────────────────────
-    if domain:
-        results["domain_intel"] = {
-            "skipped": True,
-            "reason": "Domain enrichment not yet implemented",
-        }
+    # ── Run all queries in parallel, collect within 12s budget ───────────────
+    queries = [query_virustotal, query_abuseipdb, query_otx, query_ipinfo]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(fn): fn.__name__ for fn in queries}
+        for future in as_completed(futures, timeout=12):
+            try:
+                source, data = future.result()
+                ip_intel[source] = data
+                if not data.get("skipped") and not data.get("error"):
+                    ip_intel["sources"].append(source)
+            except _TimeoutError:
+                pass
+            except Exception as exc:
+                logger.warning("enrich_ioc.source_failed %s: %s", futures[future], exc)
 
+    # ── Compute verdict ───────────────────────────────────────────────────────
+    vt      = ip_intel.get("virustotal", {})
+    abuse   = ip_intel.get("abuseipdb", {})
+    otx     = ip_intel.get("otx", {})
+
+    vt_malicious   = vt.get("malicious", 0) or 0
+    abuse_score    = abuse.get("abuse_confidence_score", 0) or 0
+    otx_pulses     = otx.get("pulse_count", 0) or 0
+
+    if vt_malicious >= 5 or abuse_score >= 80:
+        verdict = "MALICIOUS"
+    elif vt_malicious >= 1 or abuse_score >= 25 or otx_pulses >= 3:
+        verdict = "SUSPICIOUS"
+    elif (vt.get("reputation", 0) or 0) > 0:
+        verdict = "LEGITIMATE_SERVICE"
+    elif ip_intel["sources"]:
+        verdict = "CLEAN"
+    else:
+        verdict = "UNKNOWN (no API keys configured)"
+
+    ip_intel["verdict"]      = verdict
+    ip_intel["abuse_score"]  = abuse_score
+    ip_intel["vt_malicious"] = vt_malicious
+    ip_intel["otx_pulses"]   = otx_pulses
+    results["source"]        = "direct_parallel"
+    results["ip_intel"]      = ip_intel
+    results["verdict"]       = verdict
     return results
+
 
 TOOLS: Dict[str, Any] = {
     "search_alerts": search_alerts,
