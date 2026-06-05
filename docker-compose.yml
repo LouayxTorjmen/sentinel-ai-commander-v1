@@ -155,7 +155,6 @@ services:
       - ADCS_CA_NAME=${ADCS_CA_NAME:-SENTINEL-LAB-CA}
       - ADCS_TEMPLATE_NAME=${ADCS_TEMPLATE_NAME:-SentinelVulnESC1}
       - MYSQL_SCENARIO_PASSWORD=${MYSQL_SCENARIO_PASSWORD:-louay}
-      - THREATINTEL_URL=http://sentinel-threatintel:8080
       - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY}
       - OTX_API_KEY=${OTX_API_KEY}
       - ABUSEIPDB_API_KEY=${ABUSEIPDB_API_KEY}
@@ -235,27 +234,3 @@ services:
       - ${SENTINEL_BASE_DIR:-/root/sentinel-ai-commander}/scripts/inventory_watcher_entrypoint.sh:/usr/local/bin/sentinel_entrypoint.sh:ro
     entrypoint: ["/bin/bash", "/usr/local/bin/sentinel_entrypoint.sh"]
 
-  threatintel-mcp:
-    image: arjuntrivedi/fastmcp-threatintel:latest
-    container_name: sentinel-threatintel
-    restart: unless-stopped
-    networks: [sentinel_internal]
-    env_file:
-      - .env
-    environment:
-      - CACHE_TTL=${THREATINTEL_CACHE_TTL:-3600}
-      - MAX_RETRIES=3
-      - REQUEST_TIMEOUT=30
-      - IPINFO_API_KEY=${IPINFO_TOKEN}
-      - THREATINTEL_WRAPPER_PORT=8080
-    ports:
-      - "127.0.0.1:${THREATINTEL_MCP_PORT:-50070}:8080"
-    volumes:
-      - ./docker/threatintel/server.py:/wrapper/server.py:ro
-    entrypoint: ["python3", "/wrapper/server.py"]
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
