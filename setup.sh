@@ -9,7 +9,9 @@
 #   ./setup.sh --inventory      Regenerate Ansible inventory only
 #
 # What this does:
-#   1.  Check prerequisites (Docker, Docker Compose, Python 3, curl, openssl)
+#   1.  Install prerequisites — Docker, Docker Compose plugin, Python 3,
+#       curl, openssl, git, envsubst, and all packages from requirements.txt.
+#       Works on Debian/Ubuntu and RHEL/Fedora/CentOS. Skips if already installed.
 #   2.  Create .env from .env.example with auto-generated secrets
 #   3.  Prompt for required API keys (Cerebras, Groq, Gemini)
 #   4.  Set SENTINEL_BASE_DIR to current working directory
@@ -62,29 +64,151 @@ env_get() {
     grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" | head -1
 }
 
-# ── Step 1: Prerequisites ─────────────────────────────────────────────────────
-check_prerequisites() {
-    step "Checking prerequisites"
+# ── Step 1: Detect OS ─────────────────────────────────────────────────────────
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        OS_ID="${ID:-unknown}"
+        OS_FAMILY="${ID_LIKE:-$ID}"
+    elif command -v uname >/dev/null 2>&1; then
+        OS_ID="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        OS_FAMILY="$OS_ID"
+    else
+        OS_ID="unknown"
+        OS_FAMILY="unknown"
+    fi
+}
 
-    command -v docker   >/dev/null 2>&1 || fail "Docker not installed — https://docs.docker.com/engine/install/"
-    ok "Docker $(docker --version | awk '{print $3}' | tr -d ,)"
+# ── Step 1: Install prerequisites ─────────────────────────────────────────────
+install_prerequisites() {
+    step "Installing prerequisites"
+    detect_os
 
+    # ── System packages ───────────────────────────────────────────────────────
+    if echo "$OS_FAMILY" in *"debian"* *"ubuntu"* 2>/dev/null || \
+       [[ "$OS_ID" =~ ^(debian|ubuntu|linuxmint|pop|elementary)$ ]]; then
+
+        info "Detected Debian/Ubuntu — using apt"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+
+        # Docker
+        if ! command -v docker >/dev/null 2>&1; then
+            info "Installing Docker..."
+            apt-get install -y -qq ca-certificates curl gnupg lsb-release
+            install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+                | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null || true
+            # Fall back to distro package if key fails (works on most Ubuntu versions)
+            apt-get install -y -qq docker.io docker-compose-plugin 2>/dev/null || \
+            apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        fi
+
+        # Core tools
+        apt-get install -y -qq \
+            python3 python3-pip python3-venv \
+            curl openssl git openssh-client \
+            gettext-base 2>/dev/null || true
+
+    elif [[ "$OS_FAMILY" =~ rhel|fedora|centos|almalinux|rocky ]]; then
+
+        info "Detected RHEL/Fedora family — using dnf/yum"
+        local pkg_mgr="dnf"
+        command -v dnf >/dev/null 2>&1 || pkg_mgr="yum"
+
+        # Docker
+        if ! command -v docker >/dev/null 2>&1; then
+            info "Installing Docker..."
+            $pkg_mgr install -y -q yum-utils 2>/dev/null || true
+            yum-config-manager --add-repo \
+                https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+            $pkg_mgr install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        fi
+
+        # Core tools
+        $pkg_mgr install -y -q \
+            python3 python3-pip \
+            curl openssl git openssh-clients \
+            gettext 2>/dev/null || true
+
+    else
+        warn "Unrecognised OS: $OS_ID — skipping system package installation"
+        warn "Ensure these are installed manually: docker, docker-compose-plugin,"
+        warn "  python3, python3-pip, curl, openssl, git, gettext"
+    fi
+
+    # ── Docker service ────────────────────────────────────────────────────────
+    if ! docker info >/dev/null 2>&1; then
+        info "Starting Docker daemon..."
+        systemctl start docker  2>/dev/null || \
+        service docker start    2>/dev/null || \
+        dockerd &>/tmp/dockerd.log &
+        sleep 5
+    fi
+
+    if docker info >/dev/null 2>&1; then
+        ok "Docker $(docker --version | awk '{print $3}' | tr -d ,)"
+    else
+        fail "Docker daemon not responding. Start manually: sudo systemctl start docker"
+    fi
+
+    # ── Docker Compose plugin check ───────────────────────────────────────────
+    if ! docker compose version >/dev/null 2>&1; then
+        # Try installing the standalone compose plugin
+        info "Installing Docker Compose plugin..."
+        COMPOSE_VER=$(curl -s https://api.github.com/repos/docker/compose/releases/latest \
+            | grep '"tag_name"' | cut -d'"' -f4 || echo "v2.24.0")
+        ARCH=$(uname -m)
+        mkdir -p /usr/local/lib/docker/cli-plugins
+        curl -fsSL \
+            "https://github.com/docker/compose/releases/download/${COMPOSE_VER}/docker-compose-linux-${ARCH}" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+        chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+    fi
     docker compose version >/dev/null 2>&1 \
-        || fail "Docker Compose plugin missing — install 'docker-compose-plugin'"
-    ok "Docker Compose $(docker compose version --short 2>/dev/null || docker compose version | awk '{print $NF}')"
+        || fail "Docker Compose plugin still missing after install attempt"
+    ok "Docker Compose $(docker compose version --short 2>/dev/null || echo 'installed')"
 
-    command -v python3 >/dev/null 2>&1 || fail "Python 3 required"
+    # ── Python ────────────────────────────────────────────────────────────────
+    command -v python3 >/dev/null 2>&1 \
+        || fail "Python 3 not installed and could not be installed automatically"
     ok "Python $(python3 --version | awk '{print $2}')"
 
-    command -v curl    >/dev/null 2>&1 || fail "curl required"
-    ok "curl"
+    # ── Python packages from requirements.txt ────────────────────────────────
+    local req_file="$ROOT/requirements.txt"
+    if [ -f "$req_file" ]; then
+        info "Installing Python packages from requirements.txt..."
+        # Try without --break-system-packages first, then with it (needed on newer Debian/Ubuntu)
+        pip3 install -q -r "$req_file" 2>/dev/null || \
+        pip3 install -q -r "$req_file" --break-system-packages 2>/dev/null || \
+        python3 -m pip install -q -r "$req_file" --break-system-packages || {
+            warn "pip install failed — trying with a virtual environment"
+            python3 -m venv "$ROOT/.venv"
+            "$ROOT/.venv/bin/pip" install -q -r "$req_file"
+            warn "Packages installed in .venv — activate with: source .venv/bin/activate"
+        }
+        ok "Python packages installed"
+    else
+        warn "requirements.txt not found — skipping Python package installation"
+    fi
 
-    command -v openssl >/dev/null 2>&1 || fail "openssl required"
-    ok "openssl"
+    # ── Other tools ───────────────────────────────────────────────────────────
+    command -v curl    >/dev/null 2>&1 && ok "curl"    || warn "curl missing — install manually"
+    command -v openssl >/dev/null 2>&1 && ok "openssl" || warn "openssl missing — install manually"
+    command -v git     >/dev/null 2>&1 && ok "git"     || warn "git missing — install manually"
 
-    docker info >/dev/null 2>&1 \
-        || fail "Docker daemon not running — start it with: sudo systemctl start docker"
-    ok "Docker daemon running"
+    # gettext provides envsubst (used for template rendering)
+    command -v envsubst >/dev/null 2>&1 && ok "envsubst" || {
+        warn "envsubst not found — template rendering may fail"
+        warn "Install: apt install gettext-base (Debian) or dnf install gettext (RHEL)"
+    }
+
+    # Add current user to docker group if not root (avoids sudo for every docker command)
+    if [ "$(id -u)" != "0" ] && ! groups | grep -q docker; then
+        warn "Adding $(whoami) to docker group — you may need to log out and back in"
+        usermod -aG docker "$(whoami)" 2>/dev/null || true
+    fi
 }
 
 # ── Step 2: .env file ─────────────────────────────────────────────────────────
@@ -494,7 +618,7 @@ main() {
             ;;
     esac
 
-    check_prerequisites
+    install_prerequisites
     setup_env
     setup_ssh_keys
     render_wazuh_configs
