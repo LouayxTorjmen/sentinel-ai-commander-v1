@@ -592,6 +592,8 @@ async def _llm_decide(prompt: str) -> Optional[Dict[str, Any]]:
             "url":   "https://api.cerebras.ai/v1/chat/completions",
             "key":   os.getenv("CEREBRAS_API_KEY", ""),
             "model": os.getenv("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507"),
+            # thinking param removed — gpt-oss-120b returns None if sent
+            "extra_payload": {},
         },
         {
             "name":  "groq",
@@ -611,6 +613,8 @@ async def _llm_decide(prompt: str) -> Optional[Dict[str, Any]]:
         if not p["key"]:
             continue
         try:
+            if p.get("extra_payload"):
+                payload.update(p["extra_payload"])
             resp = requests.post(
                 p["url"],
                 headers={"Authorization": f"Bearer {p['key']}",

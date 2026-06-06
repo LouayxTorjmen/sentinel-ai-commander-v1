@@ -41,6 +41,7 @@ OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "mistral:7b")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
 CEREBRAS_MODEL   = os.getenv("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
 CEREBRAS_API_URL = "https://api.cerebras.ai/v1/chat/completions"
+CEREBRAS_THINKING_DISABLED = {"type": "disabled"}  # prevents reasoning tokens in output
 
 # ── Groq config ───────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -150,6 +151,7 @@ RESPONSE RULES:
 - No closing remarks or suggestions unless asked
 - Never repeat information already shown in the same response
 - If the answer is a single fact (number, name, status), just state it
+- For agent counts: ALWAYS read the 'summary', 'active_count', 'disconnected_count' fields directly from the tool result. NEVER count agents manually from a list.
 - For alerts: markdown table with columns: Timestamp (UTC) | Rule | Description | Agent. Omit src_ip/dst_ip columns entirely if all values are null or empty. Never show null values.
 - For tables: use markdown table format, max 5 rows unless more requested
 - For explanations: 2-3 sentences max unless asked for more detail
@@ -439,6 +441,9 @@ def _run_openai_compat(
         api_url   = CEREBRAS_API_URL
         api_key   = CEREBRAS_API_KEY
         model     = CEREBRAS_MODEL
+        # Note: thinking/reasoning disable not supported on all Cerebras models
+        # gpt-oss-120b returns None content if thinking param is sent
+        payload_extras = {}
     elif provider == "gemini":
         api_url   = GEMINI_API_URL
         api_key   = GEMINI_API_KEY
@@ -481,6 +486,7 @@ def _run_openai_compat(
                 json={
                     "model":       model,
                     "messages":    messages,
+                    **(payload_extras if "payload_extras" in locals() else {}),
                     "tools":       tools_schema,
                     "tool_choice": "auto",
                     "temperature": 0,
@@ -513,6 +519,8 @@ def _run_openai_compat(
         finish_reason = choice.get("finish_reason", "")
 
         assistant_content = message.get("content") or ""
+        import re as _re
+        assistant_content = _re.sub(r"<think>.*?</think>", "", assistant_content, flags=_re.DOTALL).strip()
         raw_tool_calls    = message.get("tool_calls") or []
 
         logger.info(
@@ -559,6 +567,7 @@ def _run_openai_compat(
             json={
                 "model":       model,
                 "messages":    messages,
+                **(payload_extras if "payload_extras" in locals() else {}),
                 "temperature": 0,
                 "max_tokens":  2048,
                 # Deliberately omit tools so the model can't call any more
@@ -568,7 +577,10 @@ def _run_openai_compat(
         resp.raise_for_status()
         data    = resp.json()
         choice  = (data.get("choices") or [{}])[0]
-        answer  = (choice.get("message") or {}).get("content") or ""
+        _msg    = (choice.get("message") or {})
+        answer  = _msg.get("content") or ""
+        import re as _re2
+        answer = _re2.sub(r"<think>.*?</think>", "", answer, flags=_re2.DOTALL).strip()
     except Exception as exc:
         logger.warning("agent_chat_native.%s.final_pass_failed: %s", provider, exc)
         answer = "I couldn't formulate a complete answer within the iteration limit."

@@ -761,14 +761,55 @@ class HybridAnsibleDispatcher(BaseAgent):
                 )
             else:
                 stats = (result or {}).get("stats", {}) if isinstance(result, dict) else {}
+                rc    = (result or {}).get("rc", 0) if isinstance(result, dict) else 0
                 feedback_executed(
                     incident_id=incident_id, rule_id=rule_id, agent=agent_name,
                     playbook=decision["playbook"],
-                    rc=(result or {}).get("rc", "?") if isinstance(result, dict) else "?",
+                    rc=rc,
                     ok=stats.get("ok", 0),
                     changed=stats.get("changed", 0),
                     failed=stats.get("failed", 0),
                 )
+                # Write to incidents table so get_incidents() can surface Phase 2 dispatches
+                try:
+                    from ai_agents.database.db_manager import get_db
+                    from ai_agents.database.models import Incident, IncidentStatus, SeverityLevel
+                    import uuid as _uuid
+                    alert_data = input_data.get("alert", {})
+                    rule_desc  = alert_data.get("rule", {}).get("description", decision.get("playbook", ""))
+                    src_ip     = extra_vars.get("source_ip", "")
+                    playbook_result_json = json.dumps({
+                        "playbook": decision["playbook"],
+                        "status":   "success" if rc == 0 else "failed",
+                        "changed":  stats.get("changed", 0),
+                        "rc":       rc,
+                        "source":   "phase2_static_map",
+                    })
+                    sev_str = decision.get("severity", "high").lower()
+                    sev_map = {
+                        "critical": SeverityLevel.CRITICAL,
+                        "high":     SeverityLevel.HIGH,
+                        "medium":   SeverityLevel.MEDIUM,
+                        "low":      SeverityLevel.LOW,
+                    }
+                    with get_db() as db:
+                        inc = Incident(
+                            id=str(_uuid.UUID(incident_id)) if incident_id else str(_uuid.uuid4()),
+                            wazuh_alert_id=alert_data.get("_id", incident_id),
+                            rule_id=int(rule_id) if str(rule_id).isdigit() else 0,
+                            rule_description=rule_desc[:500] if rule_desc else "",
+                            severity=sev_map.get(sev_str, SeverityLevel.HIGH),
+                            status=IncidentStatus.RESPONDING,
+                            source_ip=src_ip,
+                            recommended_action=decision["playbook"],
+                            playbook_executed=decision["playbook"],
+                            playbook_result=playbook_result_json,
+                            alert_data=alert_data,
+                        )
+                        db.merge(inc)
+                        db.commit()
+                except Exception as _db_exc:
+                    self.logger.warning("dispatch.db_write_failed", error=str(_db_exc)[:200])
             return {
                 "executed": True,
                 "dry_run": dry_run,

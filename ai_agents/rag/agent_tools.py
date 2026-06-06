@@ -394,7 +394,19 @@ def list_agents() -> Dict[str, Any]:
             "status": a.get("status"),
             "os": os_info.get("name") or os_info.get("platform"),
         })
-    return {"agents": out}
+    active       = [a for a in out if a["status"] == "active"]
+    disconnected = [a for a in out if a["status"] != "active"]
+    # Summary string first so the model reads it before the list
+    summary = f"{len(active)} active, {len(disconnected)} disconnected (total {len(out)})"
+    return {
+        "ANSWER":             summary,
+        "active_count":       len(active),
+        "disconnected_count": len(disconnected),
+        "total":              len(out),
+        "active_agents":      ", ".join(a["name"] for a in active),
+        "disconnected_agents":", ".join(a["name"] for a in disconnected),
+        "agent_details":      out,
+    }
 
 
 # ─── Tool: get_alert ──────────────────────────────────────────────────
@@ -462,11 +474,29 @@ def get_incidents(
 
     try:
         with get_db() as db:
+            # Noise rule IDs — SCA compliance checks and registry FIM checksums
+            NOISE_RULE_IDS = [
+                594, 750,          # Windows registry FIM checksums
+                19005, 19006, 19007, 19008, 19009,
+                19010, 19011, 19012, 19013, 19014,  # SCA check results
+            ]
             q = db.query(Incident).filter(Incident.created_at >= cutoff)
             if severity:
                 q = q.filter(Incident.severity == severity.lower())
             if status:
                 q = q.filter(Incident.status == status.lower())
+            # Exclude SCA/compliance/registry noise
+            q = q.filter(~Incident.rule_id.in_(NOISE_RULE_IDS))
+            # Also exclude by description patterns
+            noise_patterns = [
+                "CIS Microsoft",
+                "Score less than",
+                "Registry Key Integrity Checksum",
+                "Registry Value Integrity Checksum",
+                "SCA summary",
+            ]
+            for pattern in noise_patterns:
+                q = q.filter(~Incident.rule_description.contains(pattern))
             q = q.order_by(Incident.created_at.desc()).limit(min(limit, 100))
             rows = q.all()
             incidents = []

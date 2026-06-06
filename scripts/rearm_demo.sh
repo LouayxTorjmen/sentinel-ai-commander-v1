@@ -9,39 +9,33 @@ SSH_DNS="sshpass -p Louay2002 ssh -o StrictHostKeyChecking=no -o PubkeyAuthentic
 PLAYBOOK="docker exec sentinel-ansible-runner ansible-playbook"
 INV="-i /ansible/inventory/hosts.ini"
 
-# 1) Clear iptables block on srv-web (ignore if chain doesn't exist)
+# ── Step 1: Clear iptables block on srv-web ───────────────────────────────────
 echo "[1] Clearing iptables block on srv-web..."
 $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   -a 'iptables -N SENTINEL_BLOCK 2>/dev/null || true; iptables -F SENTINEL_BLOCK; echo cleared' \
   2>&1 | grep -E "CHANGED|FAILED|cleared"
 
-# 1b) Restart Apache on srv-web (iptables flush kills connections)
-echo "[1b] Restarting Apache on srv-web..."
+# ── Step 2: Restart Apache on srv-web ────────────────────────────────────────
+echo "[2] Restarting Apache on srv-web..."
 $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   -a 'systemctl restart apache2 && systemctl is-active apache2' \
   2>&1 | grep -E "CHANGED|FAILED|active"
 
-# 2) Clear Windows Firewall block on srv-ad-dns
-echo "[2] Clearing Windows Firewall blocks on srv-ad-dns..."
-$ANSIBLE $INV srv-ad-dns -m win_shell \
-  -a 'Get-NetFirewallRule -DisplayName "SentinelAI-Block-*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule; echo "cleared"' \
-  2>&1 | grep -E "CHANGED|FAILED|cleared"
-
-# 3) Re-arm nginx weak TLS
+# ── Step 3: Re-arm nginx weak TLS ────────────────────────────────────────────
 echo "[3] Re-arming nginx weak TLS..."
 $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   -a 'rm -f /etc/nginx/sites-enabled/sentinel-weak-tls.conf 2>/dev/null; true' \
   2>&1 | tail -1
 $PLAYBOOK $INV /ansible/playbooks/setup_nginx_weak_tls.yml 2>&1 | tail -2
 
-# 3b) Ensure Apache is running after nginx re-arm
-echo "[3b] Ensuring Apache is running..."
+# ── Step 4: Ensure Apache is running after nginx re-arm ──────────────────────
+echo "[4] Ensuring Apache is running after nginx re-arm..."
 $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   -a 'systemctl restart apache2 && systemctl is-active apache2' \
   2>&1 | grep -E "CHANGED|FAILED|active"
 
-# 4) Re-enable MySQL general log + restore dvwa SELECT on infra_credentials
-echo "[4] Re-arming MySQL..."
+# ── Step 5: Re-arm MySQL ──────────────────────────────────────────────────────
+echo "[5] Re-arming MySQL..."
 $ANSIBLE $INV srv-sql -m shell \
   -a "mysql -u root -plouay -e \"
     SET GLOBAL general_log='ON';
@@ -51,25 +45,19 @@ $ANSIBLE $INV srv-sql -m shell \
   \" 2>/dev/null && echo OK" \
   2>&1 | grep -E "CHANGED|FAILED|OK"
 
-# 5) Re-arm AD CS ESC1 template
-echo "[5] Re-arming AD CS ESC1 template..."
-$ANSIBLE $INV srv-ad-dns -m win_shell \
-  -a 'certutil -SetCATemplates +SentinelVulnESC1; echo done' \
-  2>&1 | grep -E "CHANGED|FAILED|done|completed"
-
-# 6) Remove cron backdoor
+# ── Step 6: Remove cron backdoor ─────────────────────────────────────────────
 echo "[6] Removing cron backdoor..."
 $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   -a 'rm -f /etc/cron.d/sentinel-backdoor && echo cleaned' \
   2>&1 | grep -E "CHANGED|FAILED|cleaned"
 
-# 7) Remove webshell (force fresh plant in Act 2)
+# ── Step 7: Remove webshell ───────────────────────────────────────────────────
 echo "[7] Removing old webshell..."
 $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   -a 'rm -f /var/www/html/dvwa/hackable/uploads/sentinel_shell.php && echo cleaned' \
   2>&1 | grep -E "CHANGED|FAILED|cleaned"
 
-# 8) Reset DVWA security level to 'impossible' so Act 2 sets it to 'low'
+# ── Step 8: Reset DVWA security level ────────────────────────────────────────
 echo "[8] Resetting DVWA security level..."
 $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   -a "mysql -h 10.50.0.13 -u dvwa -pp@ssw0rd dvwa \
@@ -77,9 +65,8 @@ $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
       2>/dev/null && echo reset || echo skipped" \
   2>&1 | grep -E "CHANGED|FAILED|reset|skipped"
 
-
-# 8b) Fix dnsdist config syntax + restore iptables DOH logging + restart
-echo "[8b] Fixing dnsdist config, restoring iptables DOH rule, restarting..."
+# ── Step 9: Fix dnsdist config + restore iptables DOH rules ──────────────────
+echo "[9] Fixing dnsdist config, restoring iptables DOH rule, restarting..."
 $SSH_DNS \
   "sudo iptables -F SENTINEL_BLOCK 2>/dev/null; \
    sudo iptables -N SENTINEL_DOH 2>/dev/null || sudo iptables -F SENTINEL_DOH; \
@@ -94,28 +81,39 @@ $SSH_DNS \
    echo doh_iptables_restored" 2>/dev/null \
   | grep -E "restored|failed" || true
 
-# 8b-dnsdist) Clean dnsdist NMG block entries + restart
-echo "[8b] Fixing dnsdist config and restarting..."
+# ── Step 10: Fix dnsdist NMG block entries + restart ─────────────────────────
+echo "[10] Fixing dnsdist config and restarting..."
 $SSH_DNS "sudo python3 /usr/local/bin/fix_dnsdist_clean.py && sudo systemctl restart dnsdist && sudo systemctl is-active dnsdist || echo failed" 2>/dev/null | grep -E "fixed|active|failed" || true
-# Verify dnsdist actually started — if not, force clean and retry
 $SSH_DNS "sudo systemctl is-active dnsdist || (sudo python3 /usr/local/bin/fix_dnsdist_clean.py && sudo systemctl restart dnsdist && sudo systemctl is-active dnsdist)" 2>/dev/null | grep -E "active|failed" || true
-# 9c) Ensure Wazuh agents are running on Windows hosts
-echo "[9c] Starting Wazuh agents on Windows hosts + ensuring WinRM on srv-ftp..."
-$ANSIBLE $INV srv-ftp -m win_shell   -a "Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private;       Start-Service WinRM -ErrorAction SilentlyContinue;       net accounts /lockoutthreshold:0"   2>&1 | tail -2 || true
-echo "[9c] Starting Wazuh agents on Windows hosts..."
-$ANSIBLE $INV srv-ad-dns -m win_shell   -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue;       (Get-Service WazuhSvc).Status'   2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
-$ANSIBLE $INV srv-ftp -m win_shell   -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue;       (Get-Service WazuhSvc).Status'   2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
 
-# 10) Re-arm Act 3 scenario state — AD accounts for AS-REP roast + Kerberoast
-# 9c) Ensure Wazuh agents are running on Windows hosts
-echo "[9c] Starting Wazuh agents on Windows hosts + ensuring WinRM on srv-ftp..."
-$ANSIBLE $INV srv-ftp -m win_shell   -a "Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private;       Start-Service WinRM -ErrorAction SilentlyContinue;       net accounts /lockoutthreshold:0"   2>&1 | tail -2 || true
-echo "[9c] Starting Wazuh agents on Windows hosts..."
-$ANSIBLE $INV srv-ad-dns -m win_shell   -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue;       (Get-Service WazuhSvc).Status'   2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
-$ANSIBLE $INV srv-ftp -m win_shell   -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue;       (Get-Service WazuhSvc).Status'   2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
+# ── Step 11: Start WinRM + Wazuh on Windows hosts ────────────────────────────
+echo "[11] Starting WinRM and Wazuh agents on Windows hosts..."
+$ANSIBLE $INV srv-ftp -m win_shell \
+  -a "Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private; \
+      Start-Service WinRM -ErrorAction SilentlyContinue; \
+      net accounts /lockoutthreshold:0" \
+  2>&1 | tail -2 || true
+$ANSIBLE $INV srv-ad-dns -m win_shell \
+  -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue; (Get-Service WazuhSvc).Status' \
+  2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
+$ANSIBLE $INV srv-ftp -m win_shell \
+  -a 'Start-Service WazuhSvc -ErrorAction SilentlyContinue; (Get-Service WazuhSvc).Status' \
+  2>&1 | grep -E "Running|Stopped|CHANGED|FAILED" || true
 
-# 10) Re-arm Act 3 scenario state
-echo "[10] Re-arming Act 3 AD scenario accounts..."
+# ── Step 12: Clear Windows Firewall blocks on srv-ad-dns ─────────────────────
+echo "[12] Clearing Windows Firewall blocks on srv-ad-dns..."
+$ANSIBLE $INV srv-ad-dns -m win_shell \
+  -a 'Get-NetFirewallRule -DisplayName "SentinelAI-Block-*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule; echo "cleared"' \
+  2>&1 | grep -E "CHANGED|FAILED|cleared" || true
+
+# ── Step 13: Re-arm AD CS ESC1 template ──────────────────────────────────────
+echo "[13] Re-arming AD CS ESC1 template..."
+$ANSIBLE $INV srv-ad-dns -m win_shell \
+  -a 'certutil -SetCATemplates +SentinelVulnESC1; echo done' \
+  2>&1 | grep -E "CHANGED|FAILED|done|completed" || true
+
+# ── Step 14: Re-arm AD scenario accounts ─────────────────────────────────────
+echo "[14] Re-arming AD scenario accounts (AS-REP roast + Kerberoast)..."
 $ANSIBLE $INV srv-ad-dns -m win_shell \
   -a "Import-Module ActiveDirectory; \
       try { Set-ADAccountControl svc-legacy -DoesNotRequirePreAuth \$true; Enable-ADAccount svc-legacy; Write-Host svc-legacy-updated } \
@@ -124,31 +122,32 @@ $ANSIBLE $INV srv-ad-dns -m win_shell \
       catch { New-ADUser -Name svc-mssql -SamAccountName svc-mssql -AccountPassword (ConvertTo-SecureString MssqlP@ss2024! -AsPlainText -Force) -Enabled \$true -PasswordNeverExpires \$true; Write-Host svc-mssql-created }; \
       \$spns=(Get-ADUser svc-mssql -Properties ServicePrincipalNames).ServicePrincipalNames; \
       if (\$spns -notcontains 'MSSQLSvc/srv-sql.mydomain.com:1433') { Set-ADUser svc-mssql -ServicePrincipalNames @{Add='MSSQLSvc/srv-sql.mydomain.com:1433'}; Write-Host SPN-registered } else { Write-Host SPN-already-set }" \
-  2>&1 | grep -E "CHANGED|FAILED|created|updated|SPN"
-# 11) Clean up Act 3 artifacts from previous runs on srv-web
-echo "[11] Cleaning Act 3 artifacts from srv-web..."
+  2>&1 | grep -E "CHANGED|FAILED|created|updated|SPN" || true
+
+# ── Step 15: Clean Act 3 artifacts from srv-web ──────────────────────────────
+echo "[15] Cleaning Act 3 artifacts from srv-web..."
 $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
   -a 'rm -f /tmp/SENTINEL_RANSOM_NOTE.txt /tmp/exfil_bundle.tar.gz
       rm -f /tmp/sentinel_procs_*.txt /tmp/sentinel_netstat_*.txt /tmp/sentinel_auth_*.txt
       echo "cleaned"' \
   2>&1 | grep -E "CHANGED|cleaned"
 
-# 9b) Wait for dispatcher dedup window to expire
-echo "[9b] Waiting 65s for dispatcher dedup window to expire..."
+# ── Step 16: Wait for dispatcher dedup window to expire ──────────────────────
+echo "[16] Waiting 65s for dispatcher dedup window to expire..."
 sleep 65
-# 9) Verify Kali can reach DVWA (most important check)
-echo "[9] Verifying DVWA is reachable from outside..."
+
+# ── Step 17: Verify DVWA is reachable ────────────────────────────────────────
+echo "[17] Verifying DVWA is reachable from outside..."
 HTTP=$(curl -sS -o /dev/null -w "%{http_code}" http://10.50.0.12/dvwa/login.php 2>/dev/null || echo "FAIL")
 echo "    DVWA HTTP status: $HTTP"
 if [ "$HTTP" != "200" ]; then
-  echo "    WARNING: DVWA not reachable! Check iptables on srv-web."
-  # Force clear all iptables rules
+  echo "    WARNING: DVWA not reachable — force-clearing iptables on srv-web..."
   $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
     -a 'iptables -F && iptables -X && iptables -P INPUT ACCEPT && echo "iptables reset"' \
+    2>&1 | grep -E "CHANGED|reset"
   $ANSIBLE $INV Ubuntu-agent-web -m shell --become \
     -a 'systemctl restart apache2 && echo "apache restarted"' \
     2>&1 | grep -E "CHANGED|restarted"
-    2>&1 | grep -E "CHANGED|reset"
 fi
 
 echo ""
