@@ -162,6 +162,10 @@ def run_playbook():
             "inventory": "{}/inventory/hosts.ini".format(ANSIBLE_BASE),
             "extravars": extra_vars,
             "quiet": False,
+            "envvars": {
+                "ANSIBLE_ROLES_PATH": "/ansible/roles",
+                "ANSIBLE_CONFIG": "/ansible/ansible.cfg",
+            },
         }
         if tags:
             runner_args["tags"] = ",".join(tags)

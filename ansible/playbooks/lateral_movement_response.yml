@@ -9,5 +9,9 @@
 
   roles:
     - collect_evidence
-    - block_ip
+    - role: block_ip
+      vars:
+        block_ip_address: "{{ source_ip }}"
+        block_ip_comment: "SENTINEL-AI: Lateral movement response — incident {{ incident_id }}"
+        block_duration_seconds: 3600
     - notify_soc
