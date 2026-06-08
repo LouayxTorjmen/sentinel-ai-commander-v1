@@ -382,8 +382,8 @@ function escHtml(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').rep
 function escAttr(s){return(s||'').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function renderBot(raw){if(!raw)return'';var s=raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   // Markdown tables
-  s=s.replace(/(?:^\|.*\|[ \t]*\n)+/gm,function(block){
-    var rows=block.trim().split('\n').map(function(r){return r.trim()});
+  s=s.replace(/(?:^\|.*\|[ \t]*(?:\n|$))+/gm,function(block){
+    var rows=block.trim().split('\n').map(function(r){return r.trim()}).filter(function(r){return r.length>0});
     if(rows.length<2)return block;
     var sep=rows[1];
     if(!/^\|[\s:|-]+\|$/.test(sep))return block;

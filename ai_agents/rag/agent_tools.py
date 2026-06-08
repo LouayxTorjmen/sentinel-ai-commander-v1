@@ -80,7 +80,8 @@ def search_alerts(
     min_level: int = 0,
     limit: int = 100,
 ) -> Dict[str, Any]:
-    """Search Wazuh alerts in the indexer with structured filters.
+    """NOTE: for playbook executions, incidents, or automated responses — use get_incidents instead.
+    Search Wazuh alerts in the indexer with structured filters.
 
     All parameters are optional - pass only the ones that matter. Returns
     a dict with 'total' (total matching, may exceed limit) and 'alerts'
@@ -100,9 +101,9 @@ def search_alerts(
     """
     body: Dict[str, Any] = {
         "size": min(max(int(limit), 1), 200),
-        "sort": [{"timestamp": {"order": "desc"}}],
+        "sort": [{"@timestamp": {"order": "desc"}}],
         "query": {"bool": {"must": [
-            {"range": {"timestamp": {"gte": f"now-{time_window}"}}},
+            {"range": {"@timestamp": {"gte": f"now-{time_window}"}}},
         ]}},
     }
     must = body["query"]["bool"]["must"]
@@ -223,7 +224,7 @@ def search_alerts(
     # ambiguous to small LLMs because they don't know which index a
     # given event type lives in. Hiding that distinction inside the
     # tool eliminates a whole class of wrong-tool failures.
-    if result.get("total", 0) == 0:
+    if result.get("total", 0) == 0 and min_level <= 5:
         try:
             archive_query_parts = []
             if signature_contains:
@@ -313,7 +314,7 @@ def top_signatures(
     body: Dict[str, Any] = {
         "size": 0,
         "query": {"bool": {"must": [
-            {"range": {"timestamp": {"gte": f"now-{time_window}"}}},
+            {"range": {"@timestamp": {"gte": f"now-{time_window}"}}},
         ]}},
         "aggs": {
             "by_sig": {
@@ -441,22 +442,14 @@ def get_incidents(
     time_window: str = "7d",
     limit: int = 20,
 ) -> Dict[str, Any]:
-    """List incidents triaged by the orchestrator from the Postgres DB.
-
-    The orchestrator is fired automatically on every level>=5 alert and
-    runs log_analyzer (classify + MITRE) -> threat_intel (enrich) ->
-    cve_scanner (NVD lookup) -> incident_responder (DB write) ->
-    ansible_dispatch (playbook routing). Each run produces an Incident
-    with severity, alert_type, mitre_techniques, analysis paragraph,
-    recommended_action, and dispatch decision.
-
-    Use this for questions like 'what incidents have we had today',
-    'what did the system find about X', 'show high-severity incidents
-    from this week', 'what playbooks were dispatched'.
-
-    severity: 'low' / 'medium' / 'high' / 'critical' (None = all)
-    status: 'open' / 'analyzing' / 'resolved' (None = all)
-    time_window: OpenSearch-style date math ('7d', '24h', '30d')
+    """List incidents and playbook executions from the Postgres DB.
+    CORRECT TOOL for: 'what playbooks were executed today?', 'what incidents happened?',
+    'did SENTINEL respond to any attacks?', 'what was blocked automatically?',
+    'show automated responses', 'what playbooks ran this week?'.
+    Returns: playbook_executed, rule_id, severity, source_ip, timestamps for each incident.
+    severity: 'low'/'medium'/'high'/'critical' (None=all)
+    status: 'open'/'analyzing'/'resolved'/'responding' (None=all)
+    time_window: '24h', '7d', '30d'
     """
     from datetime import datetime, timedelta
     from ai_agents.database.db_manager import get_db
@@ -517,7 +510,11 @@ def get_incidents(
                     "playbook_executed": r.playbook_executed,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                 })
-            return {"total": len(incidents), "incidents": incidents}
+            summary = f"{len(incidents)} incidents found"
+        if incidents:
+            playbooks = list({i["recommended_action"] for i in incidents if i.get("recommended_action")})
+            summary += f". Playbooks: {', '.join(playbooks)}"
+        return {"total": len(incidents), "summary": summary, "incidents": incidents}
     except Exception as exc:
         logger.warning("agent_tools.get_incidents.failed: %s", exc)
         return {"total": 0, "incidents": [], "error": str(exc)}
@@ -594,9 +591,9 @@ def search_archives(
     """
     body: Dict[str, Any] = {
         "size": min(max(int(limit), 1), 100),
-        "sort": [{"timestamp": {"order": "desc"}}],
+        "sort": [{"@timestamp": {"order": "desc"}}],
         "query": {"bool": {"must": [
-            {"range": {"timestamp": {"gte": f"now-{time_window}"}}},
+            {"range": {"@timestamp": {"gte": f"now-{time_window}"}}},
         ]}},
     }
     must = body["query"]["bool"]["must"]
@@ -632,6 +629,8 @@ def search_archives(
         src = h.get("_source", {})
         d = src.get("data", {}) or {}
         events.append({
+            "_id":        h.get("_id", ""),
+            "_index":     h.get("_index", ""),
             "timestamp": src.get("timestamp") or src.get("@timestamp"),
             "agent_name": (src.get("agent", {}) or {}).get("name"),
             "src_ip": d.get("src_ip") or d.get("srcip"),
@@ -965,9 +964,9 @@ def get_fim_events(
     """
     body: Dict[str, Any] = {
         "size": min(max(int(limit), 1), 100),
-        "sort": [{"timestamp": {"order": "desc"}}],
+        "sort": [{"@timestamp": {"order": "desc"}}],
         "query": {"bool": {"must": [
-            {"range":  {"timestamp": {"gte": f"now-{time_window}"}}},
+            {"range":  {"@timestamp": {"gte": f"now-{time_window}"}}},
             # FIM events always have syscheck in their rule groups
             {"bool": {"should": [
                 {"match_phrase": {"rule.groups": "syscheck"}},
@@ -1055,7 +1054,8 @@ def execute_playbook(
     reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute an Ansible response playbook on a target host (two-phase confirmation).
-
+    USE ONLY when the user explicitly asks to RUN/EXECUTE/BLOCK/ISOLATE something.
+    DO NOT use to LIST or CHECK what playbooks ran — use get_incidents for that.
     CRITICAL — always call with confirmed=False first. This returns a
     preview of what will happen and asks the user to confirm. Only call
     with confirmed=True after the user explicitly says 'confirm', 'yes',
@@ -1224,7 +1224,19 @@ def execute_playbook(
     ansible_status = result.get("status", "unknown")
     summary = result.get("summary", {})
 
+    changed = summary.get("changed", 0)
+    failed  = summary.get("failed", 0)
+    ok      = summary.get("ok", 0)
+    # Explicit outcome — model must report this verbatim
+    if rc != 0 or failed > 0:
+        outcome = f"FAILED (rc={rc}, failed_tasks={failed})"
+    elif changed == 0 and ok == 0:
+        outcome = "FAILED — host not found in inventory or no tasks ran (changed=0, ok=0). Target host name may be wrong."
+    else:
+        outcome = f"SUCCESS (changed={changed}, ok={ok})"
     return {
+        "outcome":        outcome,
+        "success":        rc == 0 and failed == 0 and (changed > 0 or ok > 0),
         "status":         "executed",
         "incident_id":    incident_id,
         "playbook":       playbook,
@@ -1232,12 +1244,11 @@ def execute_playbook(
         "source_ip":      source_ip,
         "rc":             rc,
         "ansible_status": ansible_status,
-        "ok":             summary.get("ok", 0),
-        "changed":        summary.get("changed", 0),
-        "failed":         summary.get("failed", 0),
+        "ok":             ok,
+        "changed":        changed,
+        "failed":         failed,
         "changed_tasks":  result.get("changed_tasks", [])[:5],
         "failed_tasks":   result.get("failed_tasks", []),
-        "success":        rc == 0,
     }
 
 
@@ -1542,9 +1553,9 @@ def gather_alert_context(
     # ── 1. Fetch raw alerts from OpenSearch ───────────────────────────────────
     body: Dict[str, Any] = {
         "size": min(max(int(max_raw_alerts), 1), 2000),
-        "sort": [{"timestamp": {"order": "desc"}}],
+        "sort": [{"@timestamp": {"order": "desc"}}],
         "query": {"bool": {"must": [
-            {"range": {"timestamp": {"gte": f"now-{time_window}"}}},
+            {"range": {"@timestamp": {"gte": f"now-{time_window}"}}},
         ]}},
         "_source": [
             "timestamp", "@timestamp",
@@ -1653,9 +1664,9 @@ def gather_alert_context(
         def _fetch_with_keyword(tw: str) -> list:
             kw_body = {
                 "size": min(max(int(max_raw_alerts), 1), 2000),
-                "sort": [{"timestamp": {"order": "desc"}}],
+                "sort": [{"@timestamp": {"order": "desc"}}],
                 "query": {"bool": {"must": [
-                    {"range": {"timestamp": {"gte": f"now-{tw}"}}},
+                    {"range": {"@timestamp": {"gte": f"now-{tw}"}}},
                     {"bool": {"should": [
                         {"match": {"rule.description": keyword}},
                         {"match": {"data.alert.signature": keyword}},
@@ -1757,9 +1768,9 @@ def gather_alert_context(
             try:
                 exp_body = {
                     "size": min(max(int(max_raw_alerts), 1), 2000),
-                    "sort": [{"timestamp": {"order": "desc"}}],
+                    "sort": [{"@timestamp": {"order": "desc"}}],
                     "query": {"bool": {"must": [
-                        {"range": {"timestamp": {"gte": f"now-{_MAX_WINDOW}"}}},
+                        {"range": {"@timestamp": {"gte": f"now-{_MAX_WINDOW}"}}},
                     ]}},
                     "_source": body.get("_source", []),
                 }

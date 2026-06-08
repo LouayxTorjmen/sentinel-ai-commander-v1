@@ -30,7 +30,7 @@
 
   vars:
     cert_dir:       /etc/nginx/sentinel-tls
-    cert_cn:        "{{ cert_cn | default(ansible_fqdn | default(inventory_hostname)) }}"
+    cert_cn:        "{{ inventory_hostname }}"
     web_root:       /var/www/sentinel-weak-tls
     vhost_path:     /etc/nginx/sites-available/sentinel-weak-tls.conf
     vhost_link:     /etc/nginx/sites-enabled/sentinel-weak-tls.conf

@@ -4,31 +4,6 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import ansible_runner
-import threading
-
-def _cleanup_old_artifacts(artifacts_dir: str = "/ansible/artifacts", max_age_days: int = int(os.getenv("ANSIBLE_ARTIFACT_RETENTION_DAYS", "7"))):
-    """Delete artifact directories older than max_age_days. Runs in background."""
-    import time
-    from pathlib import Path
-    while True:
-        try:
-            cutoff = time.time() - (max_age_days * 86400)
-            artifacts = Path(artifacts_dir)
-            if artifacts.exists():
-                for entry in artifacts.iterdir():
-                    if entry.is_dir() and entry.stat().st_mtime < cutoff:
-                        import shutil
-                        shutil.rmtree(entry, ignore_errors=True)
-        except Exception:
-            pass
-        time.sleep(3600)  # run every hour
-
-# Start cleanup thread when the API starts
-_cleanup_thread = threading.Thread(
-    target=_cleanup_old_artifacts,
-    daemon=True,  # dies with the process
-)
-_cleanup_thread.start()
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -39,15 +14,7 @@ CORS(app)
 RUNNER_BASE = os.getenv("RUNNER_BASE", "/runner")
 ANSIBLE_BASE = os.getenv("ANSIBLE_BASE", "/ansible")
 
-ALLOWED_PLAYBOOKS = {
-    "block_ip", "harden_nginx_tls", "mysql_credential_response",
-    "block_adcs_abuse", "block_dns_exfil", "fim_restore_response",
-    "incident_response", "lateral_movement_response",
-    "win_lateral_movement_response", "win_incident_response",
-    "win_fim_restore_response", "brute_force_response",
-    "compromised_user_response", "malware_containment",
-    "setup_nginx_weak_tls", "seed_scenario_state",
-}
+ALLOWED_PLAYBOOKS = None  # None = allow all playbooks
 
 
 def build_outcome(task_name, lines, idx, ev):
@@ -179,7 +146,7 @@ def run_playbook():
 
     if not playbook:
         return jsonify({"error": "playbook field is required"}), 400
-    if playbook not in ALLOWED_PLAYBOOKS:
+    if ALLOWED_PLAYBOOKS is not None and playbook not in ALLOWED_PLAYBOOKS:
         return jsonify({"error": "playbook '{}' not allowed".format(playbook),
                         "allowed": list(ALLOWED_PLAYBOOKS)}), 403
 

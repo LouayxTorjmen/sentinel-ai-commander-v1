@@ -64,6 +64,15 @@ _PY_TO_JSON_TYPE = {
 def _python_type_to_schema(annotation: Any) -> Dict[str, Any]:
     if annotation is inspect.Parameter.empty:
         return {"type": "string"}
+    # Handle stringified annotations (PEP 563 / from __future__ import annotations)
+    if isinstance(annotation, str):
+        _str_map = {
+            "int": "integer", "float": "number", "bool": "boolean",
+            "str": "string", "list": "array", "dict": "object",
+            "Optional[str]": "string", "Optional[int]": "integer",
+            "List[str]": "array", "List[int]": "array",
+        }
+        return {"type": _str_map.get(annotation, "string")}
     origin = getattr(annotation, "__origin__", None)
     args   = getattr(annotation, "__args__", ())
     if origin is not None and len(args) >= 1:
@@ -153,9 +162,14 @@ RESPONSE RULES:
 - If the answer is a single fact (number, name, status), just state it
 - For agent counts: ALWAYS read the 'summary', 'active_count', 'disconnected_count' fields directly from the tool result. NEVER count agents manually from a list.
 - For alerts: markdown table with columns: Timestamp (UTC) | Rule | Description | Agent. Omit src_ip/dst_ip columns entirely if all values are null or empty. Never show null values.
+- For ANY question about playbooks executed, incidents responded to, automated actions, or what SENTINEL did: ALWAYS call get_incidents first. Never answer from memory.
 - For tables: use markdown table format, max 5 rows unless more requested
 - For explanations: 2-3 sentences max unless asked for more detail
 - For playbook execution: show confirmation block only, nothing else
+- If the user says ONLY 'confirm', 'yes', 'do it', 'proceed', or similar with no other content:
+  look at the conversation context for the LAST pending execute_playbook confirmation and call
+  execute_playbook again with confirmed=True and the EXACT same parameters (playbook, target_host,
+  source_ip) from that pending confirmation. Never ask 'confirm what?' — always look back.
 
 You have tools that query a Wazuh + Suricata SIEM.
 
@@ -187,7 +201,7 @@ TOOL SELECTION:
 - get_agent_vulnerabilities: CVEs on a specific agent
 - get_wazuh_rule: why did rule X fire? what does it detect?
 - get_fim_events: file integrity changes on a specific path
-- get_incidents: triaged incidents from the orchestrator database
+- get_incidents: MANDATORY for 'what playbooks ran', 'what did SENTINEL do', 'what was executed', 'what incidents happened', 'automated responses'. This is the ONLY tool with playbook execution history.
 - agent_inventory: installed packages, running processes, open ports
 - get_sca_results: CIS benchmark compliance results
 - get_active_blocks: what IPs are currently blocked, why was X banned
@@ -203,7 +217,7 @@ ARG RULES:
 - time_window: one token '24h', '7d', '30d'. Default '24h'
 - min_level and limit: integers, not strings. Never pass null
 - Omit args you don't need. Never pass empty strings
-- agent_name: use list_agents() to get current enrolled agent names (environment-specific)
+- agent_name: ALWAYS call list_agents() first to get the exact agent name. Never guess or use descriptive names like 'web server', 'dns server', 'ad server' — always use the exact name from list_agents()
 
 CRITICAL TOPOLOGY RULE — port scans and network attacks:
   Suricata runs on the GATEWAY AGENT, NOT on victim hosts.
@@ -309,6 +323,13 @@ def _execute_tool_calls(
             }
             if "hint" in tool_result:
                 result_for_model["hint"] = tool_result["hint"]
+        # Trim incidents result — only send summary + first 5 to avoid token limits
+        if isinstance(tool_result, dict) and tool_result.get("incidents") is not None:
+            result_for_model = {
+                "summary":   tool_result.get("summary", ""),
+                "total":     tool_result.get("total", 0),
+                "incidents": tool_result.get("incidents", [])[:5],
+            }
 
         content_str = json.dumps(result_for_model, default=str)
         if len(content_str) > 8000:
@@ -465,12 +486,12 @@ def _run_openai_compat(
     if conversation_summary and conversation_summary.strip():
         messages.append({
             "role":    "system",
-            "content": f"Conversation context: {conversation_summary[:1500]}",
+            "content": f"Conversation context (includes pending confirmations): {conversation_summary[:4000]}",
         })
     if seed_context and seed_context.strip():
         messages.append({
             "role":    "system",
-            "content": f"Seed context (sample, not authoritative): {seed_context[:1500]}",
+            "content": f"Seed context (sample, not authoritative): {seed_context[:2000]}",
         })
     messages.append({"role": "user", "content": question})
 
@@ -614,7 +635,7 @@ def _run_ollama(
     if seed_context and seed_context.strip():
         messages.append({
             "role":    "system",
-            "content": f"Seed context (sample, not authoritative): {seed_context[:1500]}",
+            "content": f"Seed context (sample, not authoritative): {seed_context[:2000]}",
         })
     messages.append({"role": "user", "content": question})
 
