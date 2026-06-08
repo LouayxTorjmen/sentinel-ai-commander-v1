@@ -230,8 +230,8 @@ class ChatEngine:
                     _has_pb = any(pb_name in last_assistant for pb_name in _pb_names)
                     if _has_pb or ("Playbook:" in last_assistant and "Target host:" in last_assistant):
                         import re as _re
-                        pb = _re.search(r"([a-z]+_[a-z_]+(?:_response|_ip|_tls|_exfil|_abuse|_containment))", last_assistant)
-                        th = _re.search(r"(?:Target host|target_host|on)[:`*\s]+`?([a-zA-Z0-9_\-\.]+)`?", last_assistant)
+                        pb = _re.search(r"Playbook[^`]*`([a-z_]+)`", last_assistant)
+                        th = _re.search(r"Target host[^`]*`([a-zA-Z0-9_\-\.]+)`", last_assistant)
                         si = _re.search(r"[Ss]ource IP[:`*\s]+`?([0-9\.]+)`?", last_assistant)
                         un = _re.search(r"[Uu]sername[:`*\s]+`?([a-zA-Z0-9_\-]+)`?", last_assistant)
                         # Also check the pending confirmation stored in session
