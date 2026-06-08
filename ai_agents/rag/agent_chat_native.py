@@ -114,9 +114,10 @@ _PARAM_HINTS = {
     "rule_id":            "Wazuh rule ID as string (e.g. '100601', '550').",
     "playbook":           "Ansible playbook name (e.g. 'block_ip', 'incident_response', 'harden_nginx_tls').",
     "target_host":        "Wazuh agent name to run the playbook on (e.g. 'srv-web'). Never 'all'.",
-    "confirmed":          "False = preview/confirmation prompt, True = actually execute. Always False on first call.",
+    # confirmed: intentionally excluded from hints — type must stay boolean from annotation
     "source_ip":          "Source IP address to block (required for block_ip and similar playbooks).",
     "reason":             "Human-readable reason for the action (for audit log).",
+    "username":           "Account name to disable (required for compromised_user_response).",
 }
 
 
@@ -218,6 +219,7 @@ ARG RULES:
 - min_level and limit: integers, not strings. Never pass null
 - Omit args you don't need. Never pass empty strings
 - agent_name: ALWAYS call list_agents() first to get the exact agent name. Never guess or use descriptive names like 'web server', 'dns server', 'ad server' — always use the exact name from list_agents()
+- For compromised_user_response: MUST pass username=<account_name> parameter. Example: execute_playbook(playbook='compromised_user_response', target_host='srv-web', username='john', confirmed=False)
 
 CRITICAL TOPOLOGY RULE — port scans and network attacks:
   Suricata runs on the GATEWAY AGENT, NOT on victim hosts.

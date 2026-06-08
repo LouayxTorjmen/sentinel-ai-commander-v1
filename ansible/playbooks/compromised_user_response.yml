@@ -2,6 +2,7 @@
 - name: SENTINEL-AI — Compromised User Response
   hosts: "{{ target_hosts | default('all') }}"
   gather_facts: yes
+  vars:
 
   pre_tasks:
     - name: Require username

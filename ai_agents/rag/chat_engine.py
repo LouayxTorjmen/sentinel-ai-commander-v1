@@ -175,7 +175,7 @@ class ChatEngine:
             if len(recent_messages) < 4:
                 return
             conversation = "\n".join(
-                f"{'Analyst' if m['role'] == 'user' else 'SENTINEL'}: {m['content'][:200]}"
+                f"{'Analyst' if m['role'] == 'user' else 'SENTINEL'}: {m['content'][:600]}"
                 for m in recent_messages[-6:]
             )
             self._ensure_chain()
@@ -212,6 +212,71 @@ class ChatEngine:
         # Get session context
         summary, recent_messages = self._get_session_context(session_id)
 
+        # Confirm interceptor — detect bare confirm and route directly to execute_playbook
+        _confirm_words = {"confirm", "yes", "do it", "proceed", "go ahead", "execute", "run it"}
+        if question.strip().lower() in _confirm_words:
+            # Find last assistant message with a pending playbook confirmation
+            _, recent = self._get_session_context(session_id)
+            for msg in reversed(recent):
+                if msg.get("role") == "assistant":
+                    last_assistant = msg.get("content", "")
+                    # Check if it contains a playbook confirmation block
+                    # Match confirmation prompts from any model format
+                    _pb_names = ["block_ip","incident_response","win_incident_response",
+                        "fim_restore_response","win_fim_restore_response","harden_nginx_tls",
+                        "mysql_credential_response","block_adcs_abuse","block_dns_exfil",
+                        "brute_force_response","win_brute_force_response","lateral_movement_response",
+                        "win_lateral_movement_response","compromised_user_response","malware_containment"]
+                    _has_pb = any(pb_name in last_assistant for pb_name in _pb_names)
+                    if _has_pb or ("Playbook:" in last_assistant and "Target host:" in last_assistant):
+                        import re as _re
+                        pb = _re.search(r"([a-z]+_[a-z_]+(?:_response|_ip|_tls|_exfil|_abuse|_containment))", last_assistant)
+                        th = _re.search(r"(?:Target host|target_host|on)[:`*\s]+`?([a-zA-Z0-9_\-\.]+)`?", last_assistant)
+                        si = _re.search(r"[Ss]ource IP[:`*\s]+`?([0-9\.]+)`?", last_assistant)
+                        un = _re.search(r"[Uu]sername[:`*\s]+`?([a-zA-Z0-9_\-]+)`?", last_assistant)
+                        # Also check the pending confirmation stored in session
+                        if not th:
+                            # Fall back to scanning all recent messages for the original request
+                            for prev_msg in recent:
+                                if prev_msg.get("role") == "user":
+                                    th_m = _re.search(r"on ([A-Za-z][a-zA-Z0-9_\-\.]+)", prev_msg.get("content",""))
+                                    if th_m:
+                                        th = th_m
+                                        break
+                        if pb and th:
+                            from ai_agents.rag.agent_tools import execute_playbook as _exec_pb
+                            pb_name = pb.group(1).strip()
+                            th_name = th.group(1).strip()
+                            src_ip  = si.group(1).strip() if si else ""
+                            username = un.group(1).strip() if un else ""
+                            self._save_message(session_id, "user", question)
+                            result = _exec_pb(
+                                playbook=pb_name,
+                                target_host=th_name,
+                                confirmed=True,
+                                source_ip=src_ip or None,
+                                reason=f"Analyst confirmed via chat",
+                                username=username or None,
+                            )
+                            outcome = result.get("outcome", "")
+                            answer = f"Playbook executed.\n\n**Outcome:** {outcome}"
+                            if result.get("changed_tasks"):
+                                answer += "\n\n**Changed tasks:**"
+                                for t in result["changed_tasks"][:5]:
+                                    answer += f"\n- {t.get('outcome','')}"
+                            self._save_message(session_id, "assistant", answer,
+                                llm_provider="direct", confidence="high",
+                                sources_used="execute_playbook")
+                            return {
+                                "session_id": session_id,
+                                "answer": answer,
+                                "confidence": "high",
+                                "sources_used": ["execute_playbook"],
+                                "llm_provider": "direct",
+                                "context_summary": {},
+                            }
+                    break
+
         # Save user message
         self._save_message(session_id, "user", question)
 
@@ -242,7 +307,7 @@ class ChatEngine:
             )
         elif recent_messages:
             conv_context = "\n".join(
-                f"{'Analyst' if m['role'] == 'user' else 'SENTINEL'}: {m['content'][:200]}"
+                f"{'Analyst' if m['role'] == 'user' else 'SENTINEL'}: {m['content'][:600]}"
                 for m in recent_messages[-6:]
             )
         else:

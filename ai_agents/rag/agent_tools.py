@@ -1043,6 +1043,8 @@ _CHATBOT_ALLOWED_PLAYBOOKS = {
     "win_brute_force_response",
     "lateral_movement_response",
     "win_lateral_movement_response",
+    "compromised_user_response",
+    "malware_containment",
 }
 
 
@@ -1052,6 +1054,7 @@ def execute_playbook(
     confirmed: bool = False,
     source_ip: Optional[str] = None,
     reason: Optional[str] = None,
+    username: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute an Ansible response playbook on a target host (two-phase confirmation).
     USE ONLY when the user explicitly asks to RUN/EXECUTE/BLOCK/ISOLATE something.
@@ -1065,7 +1068,11 @@ def execute_playbook(
     fim_restore_response, win_fim_restore_response, harden_nginx_tls,
     mysql_credential_response, block_adcs_abuse, block_dns_exfil,
     brute_force_response, win_brute_force_response, lateral_movement_response,
-    win_lateral_movement_response.
+    win_lateral_movement_response, compromised_user_response, malware_containment.
+    Required extra params by playbook:
+    - block_adcs_abuse: ca_name=SENTINEL-LAB-CA, template_name=SentinelVulnESC1
+    - compromised_user_response: username=<account to disable> — source_ip is NOT required, pass username only
+    - malware_containment: file_path=<path>, malware_process=<name>, malware_pid=<pid>
 
     playbook: name of the playbook to run.
     target_host: Wazuh agent name (e.g. 'srv-web', 'srv-ad-dns'). Never 'all'.
@@ -1154,6 +1161,8 @@ def execute_playbook(
         action_lines = [f"**Playbook**: `{playbook}`", f"**Target host**: `{target_host}`"]
         if source_ip:
             action_lines.append(f"**Source IP to block**: `{source_ip}`")
+        if username:
+            action_lines.append(f"**Username**: `{username}`")
         if reason:
             action_lines.append(f"**Reason**: {reason}")
 
