@@ -380,20 +380,24 @@ var SVG_COPY='<svg width="14" height="14" fill="none" stroke="currentColor" stro
 
 function escHtml(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}
 function escAttr(s){return(s||'').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
-function renderBot(raw){if(!raw)return'';var s=raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function renderBot(raw){if(!raw)return'';var s=raw.replace(/(\|[^\n]+\|)[ \t]*(\|[ \t]*[-:]{3,}[ \t]*)+\|/g,function(m){return m.replace(/(\|[^\n]+\|)[ \t]*(\|)/g,'$1\n$2');});s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Fix malformed tables where separator row is on same line as header
+  s=s.replace(/(\|[^\n]+\|)\s*(---[^\n]*)/g,'$1\n$2');
+  // Fix malformed tables: insert newline before separator row if missing
+  s=s.replace(/(\|[^\n]+\|) *(--- *\|[^\n]*)/g,'$1\n$2');
   // Markdown tables
-  s=s.replace(/(?:^\|.*\|[ \t]*(?:\n|$))+/gm,function(block){
+  s=s.replace(/(?:^\|?[^\n]*\|[^\n]*(?:\n|$))+/gm,function(block){
     var rows=block.trim().split('\n').map(function(r){return r.trim()}).filter(function(r){return r.length>0});
     if(rows.length<2)return block;
     var sep=rows[1];
-    if(!/^\|[\s:|-]+\|$/.test(sep))return block;
-    var head=rows[0].split('|').slice(1,-1).map(function(c){return c.trim()});
+    if(!/^\|?[\s:|-]+(?:\|[\s:|-]*)*\|?$/.test(sep))return block;
+    var head=rows[0].split('|').map(function(c){return c.trim()}).filter(function(c){return c.length>0});
     var bodyRows=rows.slice(2);
     var html='<table><thead><tr>';
     head.forEach(function(h){html+='<th>'+h+'</th>'});
     html+='</tr></thead><tbody>';
     bodyRows.forEach(function(r){
-      var cells=r.split('|').slice(1,-1).map(function(c){return c.trim()});
+      var _p=r.startsWith('|');var _s=r.endsWith('|');var cells=r.split('|').map(function(c){return c.trim()}).filter(function(c,i,a){return(_p&&_s)?(i>0&&i<a.length-1):c.length>0});
       html+='<tr>';cells.forEach(function(c){html+='<td>'+c+'</td>'});html+='</tr>';
     });
     html+='</tbody></table>';

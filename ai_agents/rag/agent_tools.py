@@ -78,9 +78,9 @@ def search_alerts(
     dest_port: Optional[int] = None,
     time_window: str = "7d",
     min_level: int = 0,
-    limit: int = 100,
+    limit: int = 200,
 ) -> Dict[str, Any]:
-    """NOTE: for playbook executions, incidents, or automated responses — use get_incidents instead.
+    """NOTE: use top_signatures for unique/most-common alert type questions. search_alerts is for specific recent events with timestamps and details.
     Search Wazuh alerts in the indexer with structured filters.
 
     All parameters are optional - pass only the ones that matter. Returns
@@ -100,7 +100,7 @@ def search_alerts(
     alerts. Call it repeatedly with refined filters as you drill in.
     """
     body: Dict[str, Any] = {
-        "size": min(max(int(limit), 1), 200),
+        "size": min(max(int(limit) * 5, 500), 1000),  # fetch more for dedup, return limit unique groups
         "sort": [{"@timestamp": {"order": "desc"}}],
         "query": {"bool": {"must": [
             {"range": {"@timestamp": {"gte": f"now-{time_window}"}}},
@@ -174,7 +174,72 @@ def search_alerts(
         summary["_id"] = h.get("_id")
         summary["_index"] = h.get("_index")
         alerts.append(summary)
-    result = {"total": total, "returned": len(alerts), "alerts": alerts}
+    # Deduplicate by (rule_description, agent_name, src_ip) — Option B
+    # Keep the most recent example of each unique combination, add occurrences count
+    seen: dict = {}
+    for a in alerts:
+        key = (
+            a.get("rule_description") or a.get("suricata_signature") or "",
+            a.get("agent_name") or "",
+            a.get("src_ip") or "",
+        )
+        if key not in seen:
+            seen[key] = dict(a)
+            seen[key]["occurrences"] = 1
+        else:
+            seen[key]["occurrences"] += 1
+            # Keep the most recent timestamp
+            if a.get("timestamp", "") > seen[key].get("timestamp", ""):
+                ts = a.get("timestamp")
+                id_ = a.get("_id")
+                idx_ = a.get("_index")
+                seen[key].update({"timestamp": ts, "_id": id_, "_index": idx_})
+    # Filter out SCA/compliance noise from deduped results
+    _noise_rules = {"594", "750", "19005", "19006", "19007", "19008",
+                    "19009", "19010", "19011", "19012", "19013", "19014"}
+    deduped = [
+        a for a in sorted(seen.values(), key=lambda x: x.get("timestamp", ""), reverse=True)
+        if str(a.get("rule_id", "")) not in _noise_rules
+    ]
+    # If we got fewer unique types than expected, enrich with top_signatures aggregation
+    # This ensures AD-CS, Kerberoast, and other low-frequency but high-value alerts appear
+    if len(deduped) < 20:
+        try:
+            agg_body = {
+                "size": 0,
+                "query": body["query"],
+                "aggs": {
+                    "by_rule": {
+                        "terms": {"field": "rule.description", "size": 50, "order": {"_count": "desc"}},
+                        "aggs": {"agents": {"terms": {"field": "agent.name", "size": 5}}}
+                    }
+                }
+            }
+            agg_data = _get_client()._indexer_request(
+                "POST", "/wazuh-alerts-4.x-*/_search",
+                json=agg_body, headers={"Content-Type": "application/json"},
+            )
+            agg_buckets = agg_data.get("aggregations", {}).get("by_rule", {}).get("buckets", [])
+            # Build a set of existing rule descriptions already in deduped
+            existing = {a.get("rule_description", "") for a in deduped}
+            _agg_skip = {"CIS Microsoft", "Score less than", "CVE-", "affects Microsoft"}
+            for b in agg_buckets:
+                sig = b.get("key", "")
+                if sig and sig not in existing and sig not in _noise_rules and not any(s in sig for s in _agg_skip):
+                    agents = [a.get("key") for a in b.get("agents", {}).get("buckets", [])]
+                    deduped.append({
+                        "rule_description": sig,
+                        "occurrences": b.get("doc_count", 0),
+                        "agent_name": agents[0] if agents else "",
+                        "timestamp": "",
+                        "_id": "",
+                        "_index": "",
+                        "_from_aggregation": True,
+                    })
+                    existing.add(sig)
+        except Exception:
+            pass
+    result = {"total": total, "returned": len(deduped), "unique": len(deduped), "alerts": deduped}
     # Aggregated digest — the LLM should prefer this over the raw alerts
     # list for "which ports / agents / signatures" questions. Keeps the
     # context fed to the answer-generation step small even for 200-alert
@@ -304,6 +369,7 @@ def top_signatures(
     rule_groups: Optional[List[str]] = None,
     time_window: str = "7d",
     top_n: int = 10,
+    min_level: int = 0,
 ) -> Dict[str, Any]:
     """Aggregate alerts by signature and return the most frequent ones.
 
@@ -322,11 +388,22 @@ def top_signatures(
                     "field": "data.alert.signature",
                     "size": min(max(int(top_n), 1), 50),
                     "order": {"_count": "desc"},
+                    "missing": "__none__",
                 },
                 "aggs": {
                     "agents": {"terms": {"field": "agent.name", "size": 10}},
                 },
-            }
+            },
+            "by_rule": {
+                "terms": {
+                    "field": "rule.description",
+                    "size": min(max(int(top_n), 1), 50),
+                    "order": {"_count": "desc"},
+                },
+                "aggs": {
+                    "agents": {"terms": {"field": "agent.name", "size": 10}},
+                },
+            },
         },
     }
     must = body["query"]["bool"]["must"]
@@ -336,6 +413,8 @@ def top_signatures(
         must.append({"bool": {"should": [
             {"match_phrase": {"rule.groups": g}} for g in rule_groups
         ], "minimum_should_match": 1}})
+    if min_level > 0:
+        must.append({"range": {"rule.level": {"gte": int(min_level)}}})
 
     try:
         data = _get_client()._indexer_request(
@@ -347,7 +426,12 @@ def top_signatures(
         logger.warning("agent_tools.top_signatures.failed: %s", exc)
         return {"signatures": [], "error": str(exc)}
 
-    buckets = data.get("aggregations", {}).get("by_sig", {}).get("buckets", [])
+    aggs = data.get("aggregations", {})
+    # Use Suricata signature if available, else fall back to rule.description
+    buckets = aggs.get("by_sig", {}).get("buckets", [])
+    buckets = [b for b in buckets if b.get("key") != "__none__"]
+    if not buckets:
+        buckets = aggs.get("by_rule", {}).get("buckets", [])
     out = []
     for b in buckets:
         agents = [a.get("key") for a in b.get("agents", {}).get("buckets", [])]
