@@ -239,7 +239,16 @@ def search_alerts(
                     existing.add(sig)
         except Exception:
             pass
-    result = {"total": total, "returned": len(deduped), "unique": len(deduped), "alerts": deduped}
+    rows = ["| Occurrences | Timestamp (UTC) | Rule | Description | Agent |", "|---|---|---|---|---|"]
+    for a in deduped[:20]:
+        occ = a.get("occurrences", 1)
+        ts = (a.get("timestamp") or "—")[:19].replace("T"," ")
+        rule = str(a.get("rule_id") or "—")
+        desc = (a.get("rule_description") or a.get("suricata_signature") or "—")[:55]
+        ag = a.get("agent_name") or "—"
+        rows.append(f"| {occ} | {ts} | {rule} | {desc} | {ag} |")
+    fmt = f"**{total:,} total** → **{len(deduped)} unique** alert types:\n\n" + "\n".join(rows)
+    result = {"total": total, "returned": len(deduped), "unique": len(deduped), "alerts": deduped, "formatted": fmt}
     # Aggregated digest — the LLM should prefer this over the raw alerts
     # list for "which ports / agents / signatures" questions. Keeps the
     # context fed to the answer-generation step small even for 200-alert
@@ -358,7 +367,8 @@ def count_alerts(
         min_level=min_level,
         limit=1,
     )
-    return {"total": result.get("total", 0)}
+    total = result.get("total", 0)
+    return {"total": total, "formatted": f"{total:,} alerts matched your query."}
 
 
 # ─── Tool: top_signatures ─────────────────────────────────────────────
@@ -440,7 +450,17 @@ def top_signatures(
             "count": b.get("doc_count", 0),
             "agents": agents,
         })
-    return {"signatures": out}
+    # Pre-formatted output — LLM includes verbatim
+    if out:
+        rows = ["| Count | Alert Type | Agents |", "|---|---|---|"]
+        for s in out:
+            agents_str = ", ".join(s.get("agents", [])) or "all"
+            sig = (s.get("signature") or "").replace("|", "\\|")
+            rows.append(f"| {s['count']} | {sig} | {agents_str} |")
+        formatted = "\n".join(rows)
+    else:
+        formatted = "No signatures found."
+    return {"signatures": out, "formatted": formatted}
 
 
 # ─── Tool: list_agents ────────────────────────────────────────────────
@@ -483,6 +503,12 @@ def list_agents() -> Dict[str, Any]:
     disconnected = [a for a in out if a["status"] != "active"]
     # Summary string first so the model reads it before the list
     summary = f"{len(active)} active, {len(disconnected)} disconnected (total {len(out)})"
+    rows = ["| Status | Name | IP | OS |", "|---|---|---|---|"]
+    for a in out:
+        icon = "🟢" if a.get("status") == "active" else "🔴"
+        os_str = (a.get("os") or "—")[:25]
+        rows.append(f"| {icon} {a['status']} | {a['name']} | {a.get('ip','—')} | {os_str} |")
+    formatted = f"**{summary}**\n\n" + "\n".join(rows)
     return {
         "ANSWER":             summary,
         "active_count":       len(active),
@@ -491,6 +517,7 @@ def list_agents() -> Dict[str, Any]:
         "active_agents":      ", ".join(a["name"] for a in active),
         "disconnected_agents":", ".join(a["name"] for a in disconnected),
         "agent_details":      out,
+        "formatted":          formatted,
     }
 
 
@@ -514,7 +541,19 @@ def get_alert(doc_id: str, doc_index: str) -> Dict[str, Any]:
     except Exception as exc:
         logger.warning("agent_tools.get_alert.failed: %s", exc)
         return {"error": str(exc)}
-    return data.get("_source", {})
+    src = data.get("_source", {})
+    rule  = src.get("rule", {})
+    agent = src.get("agent", {})
+    ts    = (src.get("@timestamp") or src.get("timestamp","—"))[:19].replace("T"," ")
+    src["formatted"] = (
+        f"**Alert: {rule.get('description','—')}**\n"
+        f"- **Rule:** {rule.get('id','—')} (Level {rule.get('level','—')})\n"
+        f"- **Agent:** {agent.get('name','—')}\n"
+        f"- **Time:** {ts} UTC\n"
+        f"- **Groups:** {', '.join(rule.get('groups',[]) or [])}\n"
+        f"- **Full log:** {(src.get('full_log') or '—')[:200]}"
+    )
+    return src
 
 
 # ─── Tool: get_incidents ──────────────────────────────────────────────
@@ -598,7 +637,16 @@ def get_incidents(
         if incidents:
             playbooks = list({i["recommended_action"] for i in incidents if i.get("recommended_action")})
             summary += f". Playbooks: {', '.join(playbooks)}"
-        return {"total": len(incidents), "summary": summary, "incidents": incidents}
+        rows = ["| Time (UTC) | Playbook | Host | Source IP | Severity |", "|---|---|---|---|---|"]
+        for inc in incidents:
+            ts = (inc.get("created_at") or "—")[:19].replace("T"," ")
+            pb = inc.get("playbook_executed") or inc.get("recommended_action") or "—"
+            host = (inc.get("alert_data") or {}).get("agent",{}).get("name","—") if isinstance(inc.get("alert_data"),dict) else "—"
+            sip = inc.get("source_ip") or "—"
+            sev = inc.get("severity") or "—"
+            rows.append(f"| {ts} | {pb} | {host} | {sip} | {sev} |")
+        formatted = f"**{summary}**\n\n" + "\n".join(rows) if incidents else f"No incidents found."
+        return {"total": len(incidents), "summary": summary, "incidents": incidents, "formatted": formatted}
     except Exception as exc:
         logger.warning("agent_tools.get_incidents.failed: %s", exc)
         return {"total": 0, "incidents": [], "error": str(exc)}
@@ -622,9 +670,10 @@ def get_incident_details(incident_id: str) -> Dict[str, Any]:
         with get_db() as db:
             r = db.query(Incident).filter(Incident.id == incident_id).first()
             if not r:
-                return {"error": f"no incident with id={incident_id}"}
-            return {
-                "id": r.id,
+                if not r:
+                    return {"error": f"no incident with id={incident_id}"}
+            result = {
+                "id": str(r.id),
                 "wazuh_alert_id": r.wazuh_alert_id,
                 "rule_id": r.rule_id,
                 "rule_description": r.rule_description,
@@ -642,7 +691,17 @@ def get_incident_details(incident_id: str) -> Dict[str, Any]:
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "updated_at": r.updated_at.isoformat() if r.updated_at else None,
                 "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
-            }
+                }
+            result["formatted"] = (
+                f"**Incident {str(r.id)[:8]}** — {r.severity} / {r.status}\n"
+                f"- **Rule:** {r.rule_id} — {r.rule_description}\n"
+                f"- **Source IP:** {r.source_ip or '—'}\n"
+                f"- **MITRE:** {', '.join(r.mitre_techniques or []) or '—'}\n"
+                f"- **Playbook:** {r.playbook_executed or '—'}\n"
+                f"- **Analysis:** {(r.analysis or '—')[:200]}\n"
+                f"- **Created:** {r.created_at.isoformat()[:19].replace('T',' ') if r.created_at else '—'} UTC"
+                )
+            return result
     except Exception as exc:
         logger.warning("agent_tools.get_incident_details.failed: %s", exc)
         return {"error": str(exc)}
@@ -726,7 +785,15 @@ def search_archives(
             "decoder": (src.get("decoder", {}) or {}).get("name"),
             "full_log_preview": (src.get("full_log") or "")[:200],
         })
-    return {"total": total, "returned": len(events), "events": events}
+    rows = ["| Time (UTC) | Agent | Src IP | Log |", "|---|---|---|---|"]
+    for e in events:
+        ts = (e.get("timestamp") or "—")[:19].replace("T"," ")
+        ag = e.get("agent_name") or "—"
+        sip = e.get("src_ip") or "—"
+        log = (e.get("full_log") or e.get("message") or "—")[:60]
+        rows.append(f"| {ts} | {ag} | {sip} | {log} |")
+    fmt = f"**{total:,} archive events** (showing {len(events)}):\n\n" + "\n".join(rows) if events else "No archive events found."
+    return {"total": total, "returned": len(events), "events": events, "formatted": fmt}
 
 
 # ─── Tool: agent_inventory ────────────────────────────────────────────
@@ -810,8 +877,26 @@ def agent_inventory(
         # Strip the wazuh metadata block - LLM doesn't need cluster info
         clean = {k: v for k, v in src.items() if k != "wazuh"}
         items.append(clean)
+    if kind == "ports":
+        rows = ["| Protocol | Local Port | State |", "|---|---|---|"]
+        for it in items:
+            proto = it.get("protocol","—")
+            port = ((it.get("local") or {}).get("port") or "—")
+            state = it.get("state","—")
+            rows.append(f"| {proto} | {port} | {state} |")
+    elif kind == "processes":
+        rows = ["| PID | Name | State |", "|---|---|---|"]
+        for it in items:
+            rows.append(f"| {it.get('pid','—')} | {(it.get('name') or '—')[:40]} | {it.get('state','—')} |")
+    elif kind == "packages":
+        rows = ["| Package | Version | Arch |", "|---|---|---|"]
+        for it in items:
+            rows.append(f"| {(it.get('name') or '—')[:40]} | {(it.get('version') or '—')[:20]} | {it.get('architecture','—')} |")
+    else:
+        rows = [f"| {str(it)[:80]} |" for it in items[:10]]
+    fmt = f"**{agent_name} — {kind}** ({total:,} total, showing {len(items)}):\n\n" + "\n".join(rows)
     return {"total": total, "returned": len(items), "kind": kind,
-            "agent_name": agent_name, "items": items}
+            "agent_name": agent_name, "items": items, "formatted": fmt}
 
 
 # ─── Registry ─────────────────────────────────────────────────────────
@@ -891,22 +976,34 @@ def get_agent_details(agent_name: str) -> Dict[str, Any]:
             return {"error": f"Agent '{agent_name}' not found. Use list_agents() to see all enrolled agents."}
 
         os_info = agent.get("os", {}) or {}
-        return {
+        os_info2 = agent.get("os", {}) or {}
+        details = {
             "id":             agent.get("id"),
             "name":           agent.get("name"),
             "ip":             agent.get("ip"),
             "status":         agent.get("status"),
             "version":        agent.get("version"),
-            "os_name":        os_info.get("name"),
-            "os_platform":    os_info.get("platform"),
-            "os_version":     os_info.get("version"),
-            "os_arch":        os_info.get("arch"),
+            "os_name":        os_info2.get("name"),
+            "os_platform":    os_info2.get("platform"),
+            "os_version":     os_info2.get("version"),
+            "os_arch":        os_info2.get("arch"),
             "last_keepalive": agent.get("lastKeepAlive"),
             "date_enrolled":  agent.get("dateAdd"),
             "group":          agent.get("group") or [],
             "manager":        agent.get("manager"),
             "node_name":      agent.get("node_name"),
         }
+        icon = "🟢" if details["status"] == "active" else "🔴"
+        details["formatted"] = (
+            f"**{icon} {details['name']}** — {details['status']}\n"
+            f"- **IP:** {details['ip']}\n"
+            f"- **OS:** {details['os_name']} {details['os_version']} ({details['os_arch']})\n"
+            f"- **Wazuh version:** {details['version']}\n"
+            f"- **Last seen:** {(details['last_keepalive'] or '—')[:19].replace('T',' ')} UTC\n"
+            f"- **Enrolled:** {(details['date_enrolled'] or '—')[:10]}\n"
+            f"- **Manager:** {details['manager']}"
+        )
+        return details
     except Exception as exc:
         logger.warning("agent_tools.get_agent_details.failed: %s", exc)
         return {"error": str(exc)}
@@ -940,44 +1037,55 @@ def get_agent_vulnerabilities(
         return {"error": f"Agent '{agent_name}' not found"}
 
     try:
+        # Query OpenSearch vulnerability index directly (Wazuh 4.8+ stores vulns here)
         client = _get_client()
-        params: Dict[str, Any] = {"limit": min(max(int(limit), 1), 100)}
+        must = [{"match": {"agent.name": agent_name}}]
         if severity:
-            params["severity"] = severity.upper()
-
-        data = client._manager_request(
-            "GET", f"/vulnerability/{agent_id}",
-            params=params,
+            must.append({"match": {"vulnerability.severity": severity.capitalize()}})
+        body = {
+            "size": min(max(int(limit), 1), 100),
+            "sort": [{"vulnerability.severity": {"order": "desc"}}],
+            "query": {"bool": {"must": must}},
+        }
+        data = client._indexer_request(
+            "POST", "/wazuh-states-vulnerabilities-*/_search",
+            json=body, headers={"Content-Type": "application/json"},
         )
-        items = data.get("data", {}).get("affected_items", [])
-        total = data.get("data", {}).get("total_affected_items", len(items))
-
+        hits = data.get("hits", {})
+        total = hits.get("total", {}).get("value", 0)
         vulns = []
-        for v in items:
+        for h in hits.get("hits", []):
+            src  = h.get("_source", {})
+            vuln = src.get("vulnerability", {})
+            pkg  = src.get("package", {})
+            score = vuln.get("score", {})
+            cvss = score.get("base") if isinstance(score, dict) else score
             vulns.append({
-                "cve_id":      v.get("cve"),
-                "severity":    v.get("severity"),
-                "cvss_score":  v.get("cvss3_score") or v.get("cvss2_score"),
-                "package":     v.get("name"),
-                "version":     v.get("version"),
-                "title":       (v.get("title") or "")[:200],
-                "published":   v.get("published"),
-                "updated":     v.get("updated"),
+                "cve_id":    vuln.get("id"),
+                "severity":  vuln.get("severity"),
+                "cvss_score": cvss,
+                "package":   pkg.get("name"),
+                "version":   pkg.get("version"),
+                "title":     (vuln.get("description") or "")[:150],
             })
-
-        # Severity summary for quick overview
         from collections import Counter
         sev_counts = Counter(v["severity"] for v in vulns if v.get("severity"))
-
+        rows = ["| CVE | Severity | CVSS | Package | Version |", "|---|---|---|---|---|"]
+        for v in vulns[:20]:
+            rows.append(f"| {v['cve_id'] or '—'} | {v['severity'] or '—'} | {v['cvss_score'] or '—'} | {v['package'] or '—'} | {v['version'] or '—'} |")
+        sev_str = " | ".join(f"{k}: {n}" for k, n in sev_counts.most_common())
+        fmt = f"**{agent_name} vulnerabilities** — {total:,} total\n**Severity:** {sev_str or 'none'}\n\n" + "\n".join(rows)
         return {
-            "agent_name":      agent_name,
-            "total":           total,
-            "returned":        len(vulns),
+            "agent_name":       agent_name,
+            "total":            total,
+            "returned":         len(vulns),
             "severity_summary": dict(sev_counts),
-            "vulnerabilities": vulns,
+            "vulnerabilities":  vulns,
+            "formatted":        fmt,
         }
     except Exception as exc:
         logger.warning("agent_tools.get_agent_vulnerabilities.failed: %s", exc)
+        return {"error": str(exc)}
         return {"error": str(exc)}
 
 
@@ -1007,12 +1115,20 @@ def get_wazuh_rule(rule_id: str) -> Dict[str, Any]:
             return {"error": f"Rule {rule_id} not found in Wazuh ruleset"}
 
         rule = items[0]
-        return {
+        mitre = rule.get("mitre") or []
+        # mitre is a flat list of technique IDs e.g. ["T1649"]
+        if isinstance(mitre, dict):
+            techniques = ", ".join(mitre.get("technique", []))
+            tactics = ", ".join(mitre.get("tactic", []))
+        else:
+            techniques = ", ".join(mitre) if mitre else "—"
+            tactics = "—"
+        result = {
             "id":          rule.get("id"),
             "description": rule.get("description"),
             "level":       rule.get("level"),
             "groups":      rule.get("groups", []),
-            "mitre":       rule.get("mitre", {}),
+            "mitre":       mitre,
             "filename":    rule.get("filename"),
             "gdpr":        rule.get("gdpr", []),
             "pci_dss":     rule.get("pci_dss", []),
@@ -1020,6 +1136,14 @@ def get_wazuh_rule(rule_id: str) -> Dict[str, Any]:
             "tsc":         rule.get("tsc", []),
             "nist_800_53": rule.get("nist_800_53", []),
         }
+        result["formatted"] = (
+            f"**Rule {result['id']}** — Level {result['level']}\n"
+            f"**Description:** {result['description']}\n"
+            f"**Groups:** {', '.join(result['groups']) or '—'}\n"
+            f"**MITRE:** {techniques or '—'}\n"
+            f"**File:** {result['filename']}"
+        )
+        return result
     except Exception as exc:
         logger.warning("agent_tools.get_wazuh_rule.failed: %s", exc)
         return {"error": str(exc)}
@@ -1106,7 +1230,15 @@ def get_fim_events(
             "_index":      h.get("_index"),
         })
 
-    return {"total": total, "returned": len(events), "time_window": time_window, "events": events}
+    rows = ["| Time (UTC) | Event | Path | Agent |", "|---|---|---|---|"]
+    for e in events:
+        ts = (e.get("timestamp") or "—")[:19].replace("T"," ")
+        evt = e.get("event_type") or e.get("type") or "change"
+        path = (e.get("path") or "—")[:60]
+        agent = e.get("agent_name") or "—"
+        rows.append(f"| {ts} | {evt} | {path} | {agent} |")
+    fmt = f"**{total:,} FIM events** (showing {len(events)}, last {time_window}):\n\n" + "\n".join(rows)
+    return {"total": total, "returned": len(events), "time_window": time_window, "events": events, "formatted": fmt}
 
 
 # ─── Tool: execute_playbook ───────────────────────────────────────────
@@ -1250,16 +1382,18 @@ def execute_playbook(
         if reason:
             action_lines.append(f"**Reason**: {reason}")
 
+        msg = (
+            "⚠️ **Confirmation required** before executing:\n\n"
+            + "\n".join(f"- {l}" for l in action_lines)
+            + "\n\nReply **confirm** to proceed or **cancel** to abort."
+        )
         return {
-            "status":  "pending_confirmation",
-            "playbook": playbook,
+            "status":    "pending_confirmation",
+            "playbook":  playbook,
             "target_host": target_host,
             "source_ip": source_ip,
-            "message": (
-                "⚠️ **Confirmation required** before executing:\n\n"
-                + "\n".join(f"- {l}" for l in action_lines)
-                + "\n\nReply **confirm** to proceed or **cancel** to abort."
-            ),
+            "message":   msg,
+            "formatted": msg,
         }
 
     # ── Phase 2: Execute ──────────────────────────────────────────────
@@ -1327,6 +1461,13 @@ def execute_playbook(
         outcome = "FAILED — host not found in inventory or no tasks ran (changed=0, ok=0). Target host name may be wrong."
     else:
         outcome = f"SUCCESS (changed={changed}, ok={ok})"
+    icon = "✅" if (rc == 0 and failed == 0 and (changed > 0 or ok > 0)) else "❌"
+    changed_list = "\n".join(f"  - {t.get('outcome',t.get('task',''))}" for t in result.get("changed_tasks",[])[:5])
+    fmt = (
+        f"{icon} **{playbook}** on `{target_host}`\n"
+        f"**Outcome:** {outcome}"
+        + (f"\n**Changed tasks:**\n{changed_list}" if changed_list else "")
+    )
     return {
         "outcome":        outcome,
         "success":        rc == 0 and failed == 0 and (changed > 0 or ok > 0),
@@ -1342,6 +1483,7 @@ def execute_playbook(
         "failed":         failed,
         "changed_tasks":  result.get("changed_tasks", [])[:5],
         "failed_tasks":   result.get("failed_tasks", []),
+        "formatted":      fmt,
     }
 
 
@@ -1423,10 +1565,20 @@ def get_active_blocks(
                     "blocks": blocks,
                 }
 
+            rows = ["| Blocked IP | Target Host | Playbook | Reason | Time |", "|---|---|---|---|---|"]
+            for b in blocks:
+                ip = b.get("blocked_ip","—")
+                host = b.get("target_agent","—")
+                pb = b.get("playbook","—")
+                reason = (b.get("reason") or "—")[:50]
+                ts = (b.get("blocked_at") or "—")[:19].replace("T"," ")
+                rows.append(f"| {ip} | {host} | {pb} | {reason} | {ts} |")
+            fmt = f"**{len(blocks)} active block(s)** (last {time_window}):\n\n" + "\n".join(rows) if blocks else f"No active blocks in the last {time_window}."
             return {
                 "total_blocks": len(blocks),
                 "time_window":  time_window,
                 "blocks":       blocks,
+                "formatted":    fmt,
             }
     except Exception as exc:
         logger.warning("agent_tools.get_active_blocks.failed: %s", exc)
@@ -1498,9 +1650,18 @@ def get_sca_results(
                 "rationale":   (c.get("rationale") or "")[:150],
             })
 
+        p_name = policies[0].get("name","—")
+        summary_str = f"Passed: {passed} | Failed: {failed} | N/A: {not_appl} | Score: {policies[0].get('score','—')}%"
+        rows = ["| Result | Title | Rationale |", "|---|---|---|"]
+        for c in compact_checks[:20]:
+            icon = "✅" if c.get("result") == "passed" else ("❌" if c.get("result") == "failed" else "➖")
+            title = (c.get("title") or "—")[:55]
+            rat = (c.get("rationale") or "—")[:45]
+            rows.append(f"| {icon} {c.get('result','—')} | {title} | {rat} |")
+        fmt = f"**SCA: {p_name}** on {agent_name}\n**{summary_str}**\n\n" + "\n".join(rows)
         return {
             "agent_name":   agent_name,
-            "policy_name":  policies[0].get("name"),
+            "policy_name":  p_name,
             "policy_id":    policy_id,
             "total_checks": total,
             "returned":     len(compact_checks),
@@ -1510,7 +1671,8 @@ def get_sca_results(
                 "not_applicable": not_appl,
                 "score_pct":      policies[0].get("score"),
             },
-            "checks": compact_checks,
+            "checks":    compact_checks,
+            "formatted": fmt,
         }
     except Exception as exc:
         logger.warning("agent_tools.get_sca_results.failed: %s", exc)
@@ -2045,6 +2207,15 @@ def gather_alert_context(
         },
         "mitre_summary": mitre_summary,
         "unique_events":  unique_events,
+        "formatted": (
+            f"**Context: {agent_name or 'all agents'} / {time_window}**\n"
+            f"Raw alerts: {total_raw:,} → {unique_count} unique event types (compression {compression})\n\n"
+            + "\n".join(
+                f"- **{e.get('rule_description','?')[:70]}** × {e.get('occurrences',1)} "
+                f"(agent: {e.get('agent_name','—')})"
+                for e in unique_events[:15]
+            )
+        ),
     }
 
 
@@ -2253,6 +2424,20 @@ def enrich_ioc(
     results["source"]        = "direct_parallel"
     results["ip_intel"]      = ip_intel
     results["verdict"]       = verdict
+    # Build formatted verdict card
+    ip = results.get("ip") or results.get("domain") or results.get("file_hash","IOC")
+    sources_summary = []
+    if ip_intel.get("vt_malicious",0) > 0:
+        sources_summary.append(f"VirusTotal: {ip_intel['vt_malicious']} malicious detections")
+    if ip_intel.get("abuse_score",0) > 0:
+        sources_summary.append(f"AbuseIPDB: confidence {ip_intel['abuse_score']}%")
+    if ip_intel.get("otx_pulses",0) > 0:
+        sources_summary.append(f"OTX: {ip_intel['otx_pulses']} threat pulses")
+    verdict_icon = {"MALICIOUS":"🔴","SUSPICIOUS":"🟡","LEGITIMATE_SERVICE":"🟢","CLEAN":"🟢","UNKNOWN":"⚪"}.get(verdict,"⚪")
+    results["formatted"] = (
+        f"**{verdict_icon} {verdict}** — `{ip}`\n"
+        + ("\n".join(f"- {s}" for s in sources_summary) if sources_summary else "- No threat intelligence found")
+    )
     return results
 
 

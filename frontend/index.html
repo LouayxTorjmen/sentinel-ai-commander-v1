@@ -250,7 +250,7 @@ body::before{
 /* Bot content formatting */
 .bot-content pre{background:var(--bg-deep);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin:10px 0;overflow-x:auto;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.6;color:var(--cyan)}
 .bot-content code{background:var(--bg-deep);padding:2px 7px;border-radius:5px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--cyan);border:1px solid var(--border)}
-.bot-content table{border-collapse:collapse;width:100%;margin:12px 0;font-size:12.5px;border-radius:10px;overflow:hidden;border:1px solid var(--border)}
+.bot-content table{border-collapse:collapse;width:100%;margin:12px 0;font-size:12.5px;border-radius:10px;overflow:hidden;border:1px solid var(--border);table-layout:auto}.bot-content th{text-align:center;padding:8px 14px;background:var(--bg-raised);color:var(--accent);font-weight:600;border-bottom:2px solid var(--accent);white-space:nowrap}.bot-content td{text-align:left;padding:7px 14px;border-bottom:1px solid var(--border);vertical-align:top;word-break:break-word;max-width:400px}
 .bot-content th{background:var(--bg-raised);color:var(--text-secondary);font-weight:600;text-align:left;padding:9px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border)}
 .bot-content td{padding:9px 12px;border-bottom:1px solid var(--border-soft);color:var(--text-primary)}
 .bot-content tr:last-child td{border-bottom:none}
@@ -380,11 +380,8 @@ var SVG_COPY='<svg width="14" height="14" fill="none" stroke="currentColor" stro
 
 function escHtml(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}
 function escAttr(s){return(s||'').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
-function renderBot(raw){if(!raw)return'';var s=raw.replace(/(\|[^\n]+\|)[ \t]*(\|[ \t]*[-:]{3,}[ \t]*)+\|/g,function(m){return m.replace(/(\|[^\n]+\|)[ \t]*(\|)/g,'$1\n$2');});s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  // Fix malformed tables where separator row is on same line as header
-  s=s.replace(/(\|[^\n]+\|)\s*(---[^\n]*)/g,'$1\n$2');
-  // Fix malformed tables: insert newline before separator row if missing
-  s=s.replace(/(\|[^\n]+\|) *(--- *\|[^\n]*)/g,'$1\n$2');
+function renderBot(raw){if(!raw)return'';var s=raw;s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // (removed table pre-processor)
   // Markdown tables
   s=s.replace(/(?:^\|?[^\n]*\|[^\n]*(?:\n|$))+/gm,function(block){
     var rows=block.trim().split('\n').map(function(r){return r.trim()}).filter(function(r){return r.length>0});
