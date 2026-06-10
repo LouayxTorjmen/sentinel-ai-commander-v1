@@ -692,15 +692,19 @@ def get_incident_details(incident_id: str) -> Dict[str, Any]:
                 "updated_at": r.updated_at.isoformat() if r.updated_at else None,
                 "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
                 }
+            mitre_str = ", ".join(r.mitre_techniques or []) or "Not mapped"
+            analysis_str = (r.analysis or "").strip()
+            if not analysis_str:
+                analysis_str = f"Phase 2 auto-dispatch: {r.recommended_action} triggered by rule {r.rule_id}"
             result["formatted"] = (
                 f"**Incident {str(r.id)[:8]}** — {r.severity} / {r.status}\n"
                 f"- **Rule:** {r.rule_id} — {r.rule_description}\n"
                 f"- **Source IP:** {r.source_ip or '—'}\n"
-                f"- **MITRE:** {', '.join(r.mitre_techniques or []) or '—'}\n"
-                f"- **Playbook:** {r.playbook_executed or '—'}\n"
-                f"- **Analysis:** {(r.analysis or '—')[:200]}\n"
+                f"- **MITRE:** {mitre_str}\n"
+                f"- **Playbook executed:** {r.playbook_executed or '—'}\n"
+                f"- **Analysis:** {analysis_str[:400]}\n"
                 f"- **Created:** {r.created_at.isoformat()[:19].replace('T',' ') if r.created_at else '—'} UTC"
-                )
+            )
             return result
     except Exception as exc:
         logger.warning("agent_tools.get_incident_details.failed: %s", exc)
@@ -1015,7 +1019,7 @@ def get_agent_details(agent_name: str) -> Dict[str, Any]:
 def get_agent_vulnerabilities(
     agent_name: str,
     severity: Optional[str] = None,
-    limit: int = 20,
+    limit: int = 200,
 ) -> Dict[str, Any]:
     """Get CVE vulnerabilities detected by Wazuh on a specific agent.
 
@@ -1040,47 +1044,98 @@ def get_agent_vulnerabilities(
         # Query OpenSearch vulnerability index directly (Wazuh 4.8+ stores vulns here)
         client = _get_client()
         must = [{"match": {"agent.name": agent_name}}]
-        if severity:
+        _valid_severities = {"critical", "high", "medium", "low"}
+        if severity and severity.lower() in _valid_severities:
             must.append({"match": {"vulnerability.severity": severity.capitalize()}})
-        body = {
-            "size": min(max(int(limit), 1), 100),
-            "sort": [{"vulnerability.severity": {"order": "desc"}}],
-            "query": {"bool": {"must": must}},
+        query = {"bool": {"must": must}}
+
+        # Step 1: Get top unique packages via aggregation
+        agg_body = {
+            "size": 0,
+            "query": query,
+            "aggs": {
+                "by_pkg": {
+                    "terms": {"field": "package.name", "size": min(max(int(limit), 10), 50)},
+                    "aggs": {
+                        "worst_sev": {"terms": {"field": "vulnerability.severity", "size": 5}},
+                        "max_cvss": {"max": {"field": "vulnerability.score.base"}},
+                        "sample_cves": {"top_hits": {"size": 50, "_source": [
+                            "vulnerability.id", "vulnerability.severity",
+                            "vulnerability.score.base", "vulnerability.description",
+                            "package.name", "package.version"
+                        ]}}
+                    }
+                },
+                "total_pkgs": {"cardinality": {"field": "package.name"}}
+            }
         }
-        data = client._indexer_request(
+        agg_data = client._indexer_request(
             "POST", "/wazuh-states-vulnerabilities-*/_search",
-            json=body, headers={"Content-Type": "application/json"},
+            json=agg_body, headers={"Content-Type": "application/json"},
         )
-        hits = data.get("hits", {})
-        total = hits.get("total", {}).get("value", 0)
+        total = agg_data.get("hits", {}).get("total", {}).get("value", 0)
+        pkg_buckets = agg_data.get("aggregations", {}).get("by_pkg", {}).get("buckets", [])
+
         vulns = []
-        for h in hits.get("hits", []):
-            src  = h.get("_source", {})
-            vuln = src.get("vulnerability", {})
-            pkg  = src.get("package", {})
-            score = vuln.get("score", {})
-            cvss = score.get("base") if isinstance(score, dict) else score
-            vulns.append({
-                "cve_id":    vuln.get("id"),
-                "severity":  vuln.get("severity"),
-                "cvss_score": cvss,
-                "package":   pkg.get("name"),
-                "version":   pkg.get("version"),
-                "title":     (vuln.get("description") or "")[:150],
-            })
+        for b in pkg_buckets:
+            for h in b.get("sample_cves", {}).get("hits", {}).get("hits", []):
+                src = h.get("_source", {})
+                vuln = src.get("vulnerability", {})
+                pkg = src.get("package", {})
+                score = vuln.get("score", {})
+                cvss = score.get("base") if isinstance(score, dict) else score
+                vulns.append({
+                    "cve_id":     vuln.get("id"),
+                    "severity":   vuln.get("severity"),
+                    "cvss_score": cvss,
+                    "package":    pkg.get("name") or b.get("key"),
+                    "version":    pkg.get("version"),
+                    "title":      vuln.get("description") or "",
+                })
         from collections import Counter
-        sev_counts = Counter(v["severity"] for v in vulns if v.get("severity"))
-        rows = ["| CVE | Severity | CVSS | Package | Version |", "|---|---|---|---|---|"]
-        for v in vulns[:20]:
-            rows.append(f"| {v['cve_id'] or '—'} | {v['severity'] or '—'} | {v['cvss_score'] or '—'} | {v['package'] or '—'} | {v['version'] or '—'} |")
+        sev_counts = Counter(v["severity"] for v in vulns if v.get("severity") and v["severity"] not in ("-","None","none","N/A",""))
+        # Group by package+version
+        from collections import defaultdict
+        by_pkg = defaultdict(list)
+        for v in vulns:
+            pkg_key = f"{v['package'] or '?'}||{v['version'] or ''}"
+            by_pkg[pkg_key].append(v)
+
+        # Build packages summary — sorted by worst CVSS
+        _sev_order = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
+        packages_summary = []
+        for pkg_key, pkg_vulns in by_pkg.items():
+            pkg_name, pkg_ver = pkg_key.split("||", 1)
+            worst_sev = max(pkg_vulns, key=lambda v: _sev_order.get(v.get("severity","Low"),0))
+            max_cvss = max((v.get("cvss_score") or 0) for v in pkg_vulns)
+            packages_summary.append({
+                "package":         pkg_name,
+                "version":         pkg_ver,
+                "cve_count":       len(pkg_vulns),
+                "worst_severity":  worst_sev.get("severity","—"),
+                "max_cvss":        max_cvss,
+                "cves":            pkg_vulns,
+            })
+        packages_summary.sort(key=lambda p: (_sev_order.get(p["worst_severity"],0), p["max_cvss"]), reverse=True)
+
+        # Formatted: unique packages table (top 20)
         sev_str = " | ".join(f"{k}: {n}" for k, n in sev_counts.most_common())
-        fmt = f"**{agent_name} vulnerabilities** — {total:,} total\n**Severity:** {sev_str or 'none'}\n\n" + "\n".join(rows)
+        rows = [
+            f"**{agent_name}** — {total:,} vulnerabilities across {len(packages_summary)} unique packages",
+            f"Severity breakdown: {sev_str or 'none'}\n",
+            "| Package | Version | CVEs | Severity | Max CVSS |",
+            "|---|---|---|---|---|"
+        ]
+        for p in packages_summary[:20]:
+            rows.append(f"| {p['package']} | {p['version']} | {p['cve_count']} | {p.get('worst_severity','?')} | {p['max_cvss']} |")
+        fmt = "\n".join(rows)
         return {
             "agent_name":       agent_name,
             "total":            total,
             "returned":         len(vulns),
             "severity_summary": dict(sev_counts),
             "vulnerabilities":  vulns,
+            "packages":         packages_summary,
             "formatted":        fmt,
         }
     except Exception as exc:
@@ -1155,7 +1210,7 @@ def get_wazuh_rule(rule_id: str) -> Dict[str, Any]:
 def get_fim_events(
     agent_name: Optional[str] = None,
     path_contains: Optional[str] = None,
-    time_window: str = "24h",
+    time_window: str = "7d",
     limit: int = 30,
 ) -> Dict[str, Any]:
     """Search for File Integrity Monitoring (FIM/syscheck) events.
@@ -1230,14 +1285,40 @@ def get_fim_events(
             "_index":      h.get("_index"),
         })
 
-    rows = ["| Time (UTC) | Event | Path | Agent |", "|---|---|---|---|"]
+    # Classify FIM events by path
+    _NORMAL_PATHS = ["/tmp/ansible", "/etc/cups", "/var/log", "ansible_payload",
+                     "AppData\\Temp", "\\Windows\\Temp", "\\Windows\\SoftwareDistribution",
+                     "/run/systemd", "/proc/", "/.cache/"]
+    _SUSPICIOUS_PATHS = ["/etc/passwd", "/etc/shadow", "/etc/sudoers", "/root/",
+                         "/bin/", "/usr/bin/", "/sbin/", "/.ssh/", "/etc/cron",
+                         "System32\\drivers", "system32\\config", "\\startup",
+                         "lsass", "mimikatz", "/boot/", "/etc/systemd/system/"]
+
+    def _classify_fim(path):
+        p = path or ""
+        if any(s in p for s in _SUSPICIOUS_PATHS): return "🔴 SUSPICIOUS"
+        if any(s in p for s in _NORMAL_PATHS): return "⚪ NORMAL"
+        return "🟡 REVIEW"
+
+    suspicious = [e for e in events if _classify_fim(e.get("path","")) == "🔴 SUSPICIOUS"]
+    review     = [e for e in events if _classify_fim(e.get("path","")) == "🟡 REVIEW"]
+    normal     = [e for e in events if _classify_fim(e.get("path","")) == "⚪ NORMAL"]
+
+    rows = [
+        f"**{total:,} FIM events** (showing {len(events)}, last {time_window}) — "
+        f"🔴 {len(suspicious)} suspicious | 🟡 {len(review)} review | ⚪ {len(normal)} normal\n",
+        "| Class | Time (UTC) | Event | Path | Permissions | Size |",
+        "|---|---|---|---|---|---|"
+    ]
     for e in events:
-        ts = (e.get("timestamp") or "—")[:19].replace("T"," ")
-        evt = e.get("event_type") or e.get("type") or "change"
-        path = (e.get("path") or "—")[:60]
-        agent = e.get("agent_name") or "—"
-        rows.append(f"| {ts} | {evt} | {path} | {agent} |")
-    fmt = f"**{total:,} FIM events** (showing {len(events)}, last {time_window}):\n\n" + "\n".join(rows)
+        ts   = (e.get("timestamp") or "—")[:19].replace("T"," ")
+        evt  = e.get("event") or e.get("event_type") or "change"
+        path = e.get("path") or "—"
+        perm = e.get("perm_after") or e.get("perm_before") or "—"
+        size = e.get("size_after") or e.get("size_before") or "—"
+        cls  = _classify_fim(path)
+        rows.append(f"| {cls} | {ts} | {evt} | {path} | {perm} | {size} |")
+    fmt = "\n".join(rows)
     return {"total": total, "returned": len(events), "time_window": time_window, "events": events, "formatted": fmt}
 
 
@@ -1494,6 +1575,7 @@ def get_active_blocks(
     source_ip: Optional[str] = None,
     agent_name: Optional[str] = None,
     time_window: str = "7d",
+    live_check: bool = False,
 ) -> Dict[str, Any]:
     """Check what IP blocks are currently active in the SENTINEL-AI system.
 
@@ -1504,6 +1586,7 @@ def get_active_blocks(
     source_ip: check if a specific IP is blocked (e.g. '10.70.0.10').
     agent_name: filter blocks on a specific agent. Omit for all agents.
     time_window: '24h', '7d', '30d'. Default '7d'.
+    live_check: if True, also queries live iptables/Windows Firewall state via Ansible.
     """
     from datetime import datetime, timedelta
     from ai_agents.database.db_manager import get_db
@@ -1546,6 +1629,8 @@ def get_active_blocks(
                 )
                 if agent_name and target != agent_name:
                     continue
+                if not r.source_ip or r.source_ip.strip() == "":
+                    continue
                 blocks.append({
                     "incident_id":      r.id,
                     "blocked_ip":       r.source_ip,
@@ -1565,15 +1650,17 @@ def get_active_blocks(
                     "blocks": blocks,
                 }
 
-            rows = ["| Blocked IP | Target Host | Playbook | Reason | Time |", "|---|---|---|---|---|"]
+            rows = ["| Blocked IP | Target Host | Playbook | Reason | Blocked At |", "|---|---|---|---|---|"]
             for b in blocks:
-                ip = b.get("blocked_ip","—")
+                ip = b.get("blocked_ip") or "—"
+                if ip == "—": continue
                 host = b.get("target_agent","—")
                 pb = b.get("playbook","—")
                 reason = (b.get("reason") or "—")[:50]
                 ts = (b.get("blocked_at") or "—")[:19].replace("T"," ")
                 rows.append(f"| {ip} | {host} | {pb} | {reason} | {ts} |")
-            fmt = f"**{len(blocks)} active block(s)** (last {time_window}):\n\n" + "\n".join(rows) if blocks else f"No active blocks in the last {time_window}."
+            valid_blocks = [b for b in blocks if b.get("blocked_ip","").strip()]
+            fmt = f"**{len(valid_blocks)} recorded block(s)** in the last {time_window} (from SENTINEL-AI dispatch log):\n\n" + "\n".join(rows) if valid_blocks else f"No block operations recorded in the last {time_window}."
             return {
                 "total_blocks": len(blocks),
                 "time_window":  time_window,
@@ -1709,9 +1796,12 @@ def _alert_to_context_record(src: Dict[str, Any]) -> Dict[str, Any]:
     alert_sub = data.get("alert", {}) or {}
     mitre     = rule.get("mitre", {}) or {}
 
+    _win_ed = ((data.get("win") or {}).get("eventdata") or {})
     src_ip = (
         data.get("srcip") or data.get("src_ip")
-        or (((data.get("win") or {}).get("eventdata") or {}).get("ipAddress"))
+        or _win_ed.get("ipAddress")
+        or _win_ed.get("sourceIp")
+        or _win_ed.get("clientAddress")
     )
 
     # MITRE: stored as lists in Wazuh 4.x
@@ -1728,7 +1818,10 @@ def _alert_to_context_record(src: Dict[str, Any]) -> Dict[str, Any]:
         "rule_groups":        rule.get("groups", []),
         "agent_name":         agent.get("name", ""),
         "agent_ip":           agent.get("ip", ""),
-        "src_ip":             src_ip or "",
+        "src_ip":             (
+                                "[local-execution]" if src_ip in ("::1","127.0.0.1","0:0:0:0:0:0:0:1")
+                                else src_ip or ""
+                              ),
         "dst_ip":             data.get("dstip") or data.get("dest_ip") or "",
         "dest_port":          data.get("dest_port") or data.get("dstport"),
         "proto":              data.get("proto", ""),
@@ -1764,6 +1857,150 @@ def _make_dedup_key(rec: Dict[str, Any]) -> tuple:
 
 
 # ─── Tool: gather_alert_context ───────────────────────────────────────────────
+
+
+def _fmt_context_analysis(unique_events: list, mitre_summary: list) -> str:
+    """True alert correlation: group by attacker IP, detect attack chains, produce narrative."""
+    import os as _os2
+    from collections import defaultdict
+
+    _raw_mgmt = _os2.getenv("SENTINEL_MANAGEMENT_SUBNETS", "10.60.0.0/24")
+    _MGMT_PREFIXES = [ip.strip().split("/")[0].rsplit(".",1)[0]+"."
+                      if "/" in ip.strip() else ip.strip()
+                      for ip in _raw_mgmt.split(",") if ip.strip()]
+
+    _NOISE_RULES = {506, 507, 508, 553, 554, 555, 5715, 40704,
+                    19005, 19006, 19007, 594, 750}
+    _NOISE_PATHS = ["/etc/cups", "/proc/", "/run/", "/tmp/ansible",
+                    "subscriptions.conf", ".pyc"]
+
+    def _is_mgmt(ip):
+        return ip and any(ip.startswith(p) for p in _MGMT_PREFIXES)
+
+    def _is_noise(e):
+        rule_id = int(e.get("rule_id") or 0)
+        if rule_id in _NOISE_RULES: return True
+        path = e.get("syscheck_path") or ""
+        src  = e.get("src_ip") or ""
+        if rule_id in (550, 553, 554) and any(p in path for p in _NOISE_PATHS): return True
+        if rule_id == 5715 and _is_mgmt(src): return True
+        return False
+
+    security_events = [e for e in unique_events if not _is_noise(e)]
+    if not security_events:
+        return "No notable security activity detected. All events are operational noise."
+
+    # ── Phase 1: Group events by attacker IP ─────────────────────────────────
+    # External IPs are attackers; internal non-mgmt IPs may be pivots
+    by_src = defaultdict(list)
+    no_src = []
+    for e in security_events:
+        src = (e.get("src_ip") or "").strip()
+        if src and not _is_mgmt(src):
+            by_src[src].append(e)
+        else:
+            no_src.append(e)
+
+    # ── Phase 2: Detect attack phases per source IP ───────────────────────────
+    _PHASE_KEYWORDS = {
+        "reconnaissance": ["scan", "nmap", "port sweep", "discovery", "enum"],
+        "initial_access": ["brute force", "login failure", "authentication fail",
+                           "sql injection", "webshell", "exploit", "upload"],
+        "execution":      ["powershell", "cmd=", "shell from", "base64", "encoded command",
+                           "script", "process injection"],
+        "persistence":    ["scheduled task", "registry", "startup", "service install",
+                           "cron", "authorized_keys"],
+        "credential":     ["kerberoast", "mimikatz", "credential", "lsass", "hash",
+                           "shadow", "passwd", "ntlm"],
+        "lateral":        ["lateral movement", "ntlm logon", "pass-the-hash",
+                           "wmi", "psexec", "winrm from"],
+        "exfiltration":   ["exfil", "dns tunnel", "doh", "data transfer", "loot"],
+        "c2":             ["beacon", "c2", "command and control", "reverse shell"],
+        "impact":         ["ransomware", "encrypt", "wipe", "malware dropped",
+                           "executable file dropped"],
+    }
+
+    def _detect_phases(events):
+        phases = {}
+        for e in events:
+            desc = (e.get("rule_description") or e.get("suricata_signature") or "").lower()
+            for phase, keywords in _PHASE_KEYWORDS.items():
+                if any(k in desc for k in keywords):
+                    if phase not in phases:
+                        phases[phase] = {"events": [], "occurrences": 0}
+                    phases[phase]["events"].append(e)
+                    phases[phase]["occurrences"] += e.get("occurrences", 1)
+        return phases
+
+    lines = []
+    total_occ = sum(e.get("occurrences",1) for e in security_events)
+    lines.append(f"**Security Assessment** — {len(security_events)} unique event types "
+                 f"({total_occ:,} occurrences) from {len(by_src)} source IP(s)")
+    lines.append("")
+
+    # ── Phase 3: Per-attacker narrative ──────────────────────────────────────
+    # Sort attackers by total occurrences descending
+    ranked_srcs = sorted(by_src.items(),
+                         key=lambda x: sum(e.get("occurrences",1) for e in x[1]),
+                         reverse=True)
+
+    for src_ip, events in ranked_srcs[:5]:
+        phases = _detect_phases(events)
+        total_src = sum(e.get("occurrences",1) for e in events)
+        first_ts = min((e.get("first_seen") or "9999-01-01") for e in events if e.get("first_seen"))[:16].replace("T"," ") if any(e.get("first_seen") for e in events) else "—"
+        last_ts  = max((e.get("last_seen")  or "0000-01-01") for e in events if e.get("last_seen"))[:16].replace("T"," ") if any(e.get("last_seen") for e in events) else "—"
+
+        lines.append(f"**Attacker: `{src_ip}`** — {total_src} events | {first_ts} → {last_ts} UTC")
+
+        if phases:
+            # Build attack chain in logical order
+            chain_order = ["reconnaissance","initial_access","execution","credential",
+                           "lateral","persistence","exfiltration","c2","impact"]
+            chain = [p for p in chain_order if p in phases]
+            if chain:
+                lines.append(f"  Attack chain: {' → '.join(p.replace('_',' ').title() for p in chain)}")
+
+            for phase in chain:
+                p_data = phases[phase]
+                top_event = max(p_data["events"], key=lambda e: e.get("occurrences",1))
+                desc = (top_event.get("rule_description") or top_event.get("suricata_signature") or "?")[:80]
+                lines.append(f"  [{phase.replace('_',' ').upper()}] {desc} (×{p_data['occurrences']})")
+        else:
+            # No phase detected — show top events
+            top = sorted(events, key=lambda e: e.get("occurrences",1), reverse=True)[:2]
+            for e in top:
+                desc = (e.get("rule_description") or "?")[:80]
+                lines.append(f"  - {desc} × {e.get('occurrences',1)}")
+        lines.append("")
+
+    # ── Phase 4: Host-side events (no source IP) ─────────────────────────────
+    if no_src:
+        host_phases = _detect_phases(no_src)
+        host_critical = [e for e in no_src if int(e.get("rule_level") or 0) >= 12]
+        host_high     = [e for e in no_src if 9 <= int(e.get("rule_level") or 0) < 12]
+
+        if host_critical or host_high:
+            lines.append("**Host-side activity (no external source IP):**")
+            for e in (host_critical + host_high)[:5]:
+                desc = e.get("rule_description") or "?"
+                occ  = e.get("occurrences", 1)
+                ts   = (e.get("last_seen") or "")[:16].replace("T"," ")
+                lines.append(f"  - [{int(e.get('rule_level',0))}] {desc} × {occ} (last: {ts})")
+            lines.append("")
+
+    # ── Phase 5: MITRE summary ────────────────────────────────────────────────
+    if mitre_summary:
+        techniques = []
+        for m in mitre_summary[:6]:
+            if not m: continue
+            tid  = m.get("technique_id") or "?"
+            name = m.get("technique_name") or ""
+            occ  = m.get("total_occurrences","")
+            techniques.append(f"{tid} ({name})" + (f" ×{occ}" if occ else ""))
+        if techniques:
+            lines.append(f"**MITRE ATT&CK:** {' · '.join(techniques)}")
+
+    return "\n".join(lines)
 
 
 def gather_alert_context(
@@ -1843,6 +2080,37 @@ def gather_alert_context(
     hits       = data.get("hits", {})
     total_raw  = hits.get("total", {}).get("value", 0)
     raw_hits   = hits.get("hits", [])
+    # Secondary fetch: pull priority rules in small batches so no single rule drowns others
+    _PRIORITY_RULE_GROUPS = [
+        ["100534","100535","100536"],          # AD-CS ESC1
+        ["100710","100711"],                    # Kerberoasting
+        ["100114","100115"],                    # Falco sensitive reads
+        ["100411","100412"],                    # DoH exfiltration
+        ["100610","100611"],                    # MySQL credential access
+        ["92213"],                              # Malware drop
+    ]
+    _prio_agent_filter = [{"match_phrase": {"agent.name": agent_name}}] if agent_name else []
+    _all_prio_hits = []
+    try:
+        for _rgroup in _PRIORITY_RULE_GROUPS:
+            _pb = {
+                "size": 5,
+                "sort": [{"@timestamp": {"order": "desc"}}],
+                "query": {"bool": {"must": [
+                    {"terms": {"rule.id": _rgroup}},
+                    {"range": {"@timestamp": {"gte": f"now-{time_window}"}}},
+                ] + _prio_agent_filter}},
+                "_source": body["_source"],
+            }
+            _pd = _get_client()._indexer_request(
+                "POST", "/wazuh-alerts-4.x-*/_search",
+                json=_pb, headers={"Content-Type": "application/json"},
+            )
+            _all_prio_hits.extend(_pd.get("hits", {}).get("hits", []))
+        if _all_prio_hits:
+            raw_hits = _all_prio_hits + raw_hits
+    except Exception as _pe:
+        logger.warning("gather_alert_context.priority_fetch: %s", _pe)
 
     if not raw_hits:
         return {
@@ -2104,6 +2372,20 @@ def gather_alert_context(
     unique_events = []
     all_timestamps = []
 
+    # Priority rules always included regardless of dedup cutoff
+    _PRIORITY_RULES = {
+        "100534","100535","100536",  # AD-CS ESC1
+        "100710","100711",            # Kerberoasting
+        "100114","100115",            # Falco sensitive reads
+        "100411","100412",            # DoH exfiltration
+        "100610","100611",            # MySQL credential access
+        "92213","92657",              # Malware drop / NTLM logon
+    }
+    priority_groups = [g for g in sorted_groups
+                       if str(g["record"].get("rule_id","")) in _PRIORITY_RULES]
+    normal_groups   = [g for g in sorted_groups
+                       if str(g["record"].get("rule_id","")) not in _PRIORITY_RULES]
+    sorted_groups   = priority_groups + normal_groups
     for g in sorted_groups[:max_unique_types]:
         rec        = g["record"]
         first_seen = g["first_seen"]
@@ -2194,6 +2476,161 @@ def gather_alert_context(
     shown_count      = len(unique_events)
     compression      = f"{len(raw_hits)}:{unique_count}" if unique_count else "N/A"
 
+    # ── Cross-agent correlation ─────────────────────────────────────────────
+    import os as _os_corr
+    _raw_mgmt2 = _os_corr.getenv("SENTINEL_MANAGEMENT_SUBNETS", "10.60.0.0/24")
+    _mgmt2 = [ip.strip().split("/")[0].rsplit(".",1)[0]+"."
+              if "/" in ip.strip() else ip.strip()
+              for ip in _raw_mgmt2.split(",") if ip.strip()]
+
+    def _is_external_ip(ip):
+        if not ip or ip in ("::1","127.0.0.1","","[local-execution]","[management/ansible]"):
+            return False
+        return not any(ip.startswith(p) for p in _mgmt2)
+
+    attacker_ips = list({e.get("src_ip","") for e in unique_events
+                         if _is_external_ip(e.get("src_ip",""))})
+    cross_agent_context = []
+
+    if attacker_ips:
+        try:
+            for aip in attacker_ips[:3]:
+                ca_data = _get_client()._indexer_request(
+                    "POST", "/wazuh-alerts-4.x-*/_search",
+                    json={"size": 50,
+                          "sort": [{"@timestamp": {"order": "asc"}}],
+                          "query": {"bool": {
+                              "should": [
+                                  {"term": {"data.srcip": aip}},
+                                  {"term": {"data.src_ip": aip}},
+                                  {"term": {"data.win.eventdata.ipAddress": aip}},
+                                  {"term": {"data.win.eventdata.sourceIp": aip}},
+                              ],
+                              "minimum_should_match": 1,
+                              "must_not": [{"term": {"agent.name": agent_name}}]
+                                          if agent_name else []
+                          }},
+                          "_source": ["@timestamp","agent.name","rule.id",
+                                      "rule.description","rule.level"]},
+                    headers={"Content-Type": "application/json"}
+                )
+                ca_hits = ca_data.get("hits",{}).get("hits",[])
+                if ca_hits:
+                    cross_agent_context.append({
+                        "attacker_ip": aip,
+                        "other_agents_hit": list({h["_source"].get("agent",{}).get("name","") for h in ca_hits}),
+                        "events": [{"ts": h["_source"].get("@timestamp","")[:16],
+                                    "agent": h["_source"].get("agent",{}).get("name",""),
+                                    "desc": h["_source"].get("rule",{}).get("description","")[:80],
+                                    "level": h["_source"].get("rule",{}).get("level",0)}
+                                   for h in ca_hits[:15]]
+                    })
+        except Exception as _ca_exc:
+            logger.warning("gather_alert_context.cross_agent: %s", _ca_exc)
+
+    # For local-execution events or no attacker IPs found,
+    # check Suricata/firewall for connections TO this agent from external IPs
+    if not attacker_ips and agent_name:
+        try:
+            import os as _os_fw
+            gw_agent = _os_fw.getenv("SENTINEL_GATEWAY_AGENT", "sentinel-fw.sentinel.lab")
+            # Get victim agent IP — from events or from Wazuh agent list
+            victim_ips = list({e.get("agent_ip","") for e in unique_events if e.get("agent_ip")})
+            if not victim_ips and agent_name:
+                try:
+                    ag = _agent_id_from_name(agent_name)
+                    if ag:
+                        ag_data = _get_client()._manager_request(
+                            "GET", f"/agents/{ag}",
+                            params={"select": "ip"}
+                        )
+                        ag_ip = ag_data.get("data",{}).get("affected_items",[{}])[0].get("ip","")
+                        if ag_ip and ag_ip != "any":
+                            victim_ips = [ag_ip]
+                except Exception:
+                    pass
+
+            # Search Suricata alerts on the gateway for traffic TO victim agent IPs
+            fw_must = [
+                {"match": {"agent.name": gw_agent}},
+                {"range": {"@timestamp": {"gte": f"now-{time_window}"}}},
+            ]
+            # Must have external source IP — use prefix range queries instead of term
+            fw_must.append({"bool": {"should": [
+                {"range": {"data.src_ip": {"gte": "10.70.0.0", "lte": "10.70.255.255"}}},
+                {"range": {"data.srcip":  {"gte": "10.70.0.0", "lte": "10.70.255.255"}}},
+            ], "minimum_should_match": 1}})
+            if victim_ips:
+                fw_must.append({"bool": {"should": [
+                    {"term": {"data.dest_ip": vip}} for vip in victim_ips[:3]
+                ] + [
+                    {"term": {"data.dstip": vip}} for vip in victim_ips[:3]
+                ], "minimum_should_match": 1}})
+
+            fw_data = _get_client()._indexer_request(
+                "POST", "/wazuh-alerts-4.x-*/_search",
+                json={"size": 50,
+                      "sort": [{"@timestamp": {"order": "asc"}}],
+                      "query": {"bool": {"must": fw_must}},
+                      "_source": ["@timestamp","rule.description","rule.level",
+                                  "data.srcip","data.src_ip","data.dstip","data.dest_ip"]},
+                headers={"Content-Type": "application/json"}
+            )
+            fw_hits = fw_data.get("hits",{}).get("hits",[])
+            fw_attackers = {}
+            for h in fw_hits:
+                d = h["_source"]
+                src = d.get("data",{}).get("srcip") or d.get("data",{}).get("src_ip","")
+                if _is_external_ip(src):
+                    if src not in fw_attackers:
+                        fw_attackers[src] = []
+                    fw_attackers[src].append({
+                        "ts":   d.get("@timestamp","")[:16],
+                        "desc": d.get("rule",{}).get("description","")[:80],
+                        "level": d.get("rule",{}).get("level",0),
+                    })
+            for fw_ip, fw_events in sorted(fw_attackers.items(),
+                                            key=lambda x: len(x[1]), reverse=True)[:3]:
+                cross_agent_context.append({
+                    "attacker_ip": fw_ip,
+                    "note": f"Network traffic to {agent_name} detected via Suricata/pfSense gateway — scan/attack from {fw_ip}",
+                    "gateway_events": fw_events[:10],
+                    "other_agents_hit": [agent_name],
+                })
+        except Exception as _fw_exc:
+            logger.warning("gather_alert_context.fw_lookup: %s", _fw_exc)
+
+    # Also check Windows eventdata.ipAddress for foothold IPs
+    if not attacker_ips and agent_name:
+        try:
+            fh_data = _get_client()._indexer_request(
+                "POST", "/wazuh-alerts-4.x-*/_search",
+                json={"size": 10,
+                      "sort": [{"@timestamp": {"order": "desc"}}],
+                      "query": {"bool": {"must": [
+                          {"match": {"agent.name": agent_name}},
+                          {"exists": {"field": "data.win.eventdata.ipAddress"}},
+                          {"range": {"@timestamp": {"gte": "now-30d"}}}]}},
+                      "_source": ["@timestamp","rule.description",
+                                  "data.win.eventdata.ipAddress","rule.level"]},
+                headers={"Content-Type": "application/json"}
+            )
+            for h in fh_data.get("hits",{}).get("hits",[]):
+                fh_ip = (h["_source"].get("data",{}).get("win",{})
+                         .get("eventdata",{}).get("ipAddress",""))
+                if _is_external_ip(fh_ip):
+                    cross_agent_context.append({
+                        "attacker_ip": fh_ip,
+                        "note": "Remote logon foothold IP from Windows event logs (may predate current window)",
+                        "foothold_event": {
+                            "ts":   h["_source"].get("@timestamp","")[:16],
+                            "desc": h["_source"].get("rule",{}).get("description","")[:80],
+                        }
+                    })
+                    break
+        except Exception as _fh_exc:
+            logger.warning("gather_alert_context.foothold: %s", _fh_exc)
+
     return {
         "summary": {
             "total_raw_alerts":   total_raw,
@@ -2207,15 +2644,8 @@ def gather_alert_context(
         },
         "mitre_summary": mitre_summary,
         "unique_events":  unique_events,
-        "formatted": (
-            f"**Context: {agent_name or 'all agents'} / {time_window}**\n"
-            f"Raw alerts: {total_raw:,} → {unique_count} unique event types (compression {compression})\n\n"
-            + "\n".join(
-                f"- **{e.get('rule_description','?')[:70]}** × {e.get('occurrences',1)} "
-                f"(agent: {e.get('agent_name','—')})"
-                for e in unique_events[:15]
-            )
-        ),
+        "cross_agent_correlation": cross_agent_context,
+        # No pre-formatted field — LLM receives structured data and performs correlation
     }
 
 

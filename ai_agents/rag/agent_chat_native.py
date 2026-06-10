@@ -160,7 +160,7 @@ SYSTEM_PROMPT = """You are SENTINEL-AI, an autonomous SOC analyst. Be concise an
 RESPONSE FORMAT:
 - No preamble, no closing remarks
 - Single facts: just state them
-- If a tool result contains a 'formatted' field, output it verbatim — no modifications, no reformatting, no additions.
+- If a tool result contains a 'formatted' field, you MUST output it EXACTLY as-is — DO NOT print raw JSON, DO NOT summarize, DO NOT restructure. The formatted field IS your entire response for that tool call.
 - For search_alerts results: table with columns Occurrences | Timestamp (UTC) | Rule | Description | Agent. Omit Occurrences if all=1. Omit src_ip/dst_ip if all null.
 - NEVER invent timestamps, rule IDs, or data not present in the tool result.
 - Tables: show ALL rows when displaying unique alert types or signatures. Max 10 rows only for raw event listings.
@@ -187,6 +187,8 @@ top_signatures — use when:
   • "what alert types fired", "most common attacks", "unique alerts", "what detected"
   • Works for both Suricata (network) and Wazuh (host) agents
   • Returns ALL types via aggregation regardless of volume
+  • NEVER pass min_level to this tool — it filters out Suricata signatures (level 3)
+  • Always use top_n=100 minimum to get comprehensive coverage
 
 count_alerts — use when:
   • User asks "how many alerts" without needing details
@@ -211,18 +213,30 @@ get_agent_details — use when:
 
 get_agent_vulnerabilities — use when:
   • CVEs on a specific agent
+  • severity param: only 'critical', 'high', 'medium', 'low' are valid. NEVER pass 'all' — omit severity to get all.
+  • Output the 'formatted' field VERBATIM. Do NOT substitute your own emojis.
 
 get_wazuh_rule — use when:
   • "what does rule X detect", "why did rule X fire"
 
 get_fim_events — use when:
   • File integrity changes on a specific path or file
+  • Default time_window=7d — NEVER override to 24h unless user explicitly asks
 
 agent_inventory — use when:
   • Installed packages, running processes, open ports on an agent
 
 get_sca_results — use when:
   • CIS benchmark / hardening compliance for an agent
+
+gather_alert_context — use when:
+  • "what's happening on host X", "panoramic view", "give me a summary of activity"
+  • "what is going on right now", "overview of recent activity on agent X"
+  • ANY question asking for a broad view, summary, or analysis of a host's activity
+  • Provides structured security data for LLM correlation — groups events by attacker IP, detects attack chains
+  • Use time_window=30m for "right now", time_window=1h for "recently", time_window=48h or 7d for longer periods
+  • NEVER use min_level filter — the tool handles noise filtering internally
+  • THIS IS THE CORRECT TOOL for "panoramic view" — do NOT use top_signatures for this
 
 execute_playbook — use when:
   • User explicitly asks to run/block/isolate/disable something
@@ -345,10 +359,82 @@ def _execute_tool_calls(
                 "total":     tool_result.get("total", 0),
                 "incidents": tool_result.get("incidents", [])[:5],
             }
+        # For vulnerability results — only send formatted + packages summary, strip raw CVE list
+        if isinstance(tool_result, dict) and tool_result.get("vulnerabilities") is not None:
+            result_for_model = {
+                "formatted": tool_result.get("formatted", ""),
+            }
+        # For gather_alert_context — send clean structured data for LLM correlation
+        if isinstance(tool_result, dict) and "unique_events" in tool_result:
+            events = tool_result.get("unique_events", [])
+            # Strip noise, keep security-relevant fields only
+            import os as _os_chat
+            _raw_mgmt = _os_chat.getenv("SENTINEL_MANAGEMENT_SUBNETS", "10.60.0.0/24")
+            _mgmt_pfx = [ip.strip().split("/")[0].rsplit(".",1)[0]+"."
+                         if "/" in ip.strip() else ip.strip()
+                         for ip in _raw_mgmt.split(",") if ip.strip()]
+            def _is_mgmt_ip(ip):
+                return ip and any(ip.startswith(p) for p in _mgmt_pfx)
+
+            _NOISE_RULES = {506,507,508,553,554,555,5715,40704,19005,19006,19007,594,750}
+            _NOISE_PATHS = ["/etc/cups","subscriptions.conf","/tmp/ansible",".pyc",
+                            "cups/subscriptions","AppData\\Temp\\ansible"]
+            _LOW_NOISE_DESCS = ["windows defender definition","software protection",
+                                "svcrestarttask","windows update","wmi activity"]
+            clean_critical = []  # level >= 9
+            clean_medium   = []  # level 6-8
+            for e in events:
+                rid = int(e.get("rule_id") or 0)
+                if rid in _NOISE_RULES: continue
+                src = e.get("src_ip") or ""
+                path = e.get("syscheck_path") or ""
+                desc = (e.get("rule_description") or "").lower()
+                # Filter known noise
+                if rid in (550,553,554) and any(p in path for p in _NOISE_PATHS): continue
+                if any(n in desc for n in _LOW_NOISE_DESCS): continue
+                src_label = "[management/ansible]" if _is_mgmt_ip(src) else src
+                event_dict = {
+                    "rule_id":    e.get("rule_id"),
+                    "level":      e.get("rule_level"),
+                    "desc":       e.get("rule_description") or e.get("suricata_signature"),
+                    "src_ip":     src_label,
+                    "agent":      e.get("agent_name"),
+                    "occurrences":e.get("occurrences"),
+                    "last_seen":  (e.get("last_seen") or "")[:16],
+                    "mitre":      e.get("mitre_technique_id"),
+                }
+                lvl = int(e.get("rule_level") or 0)
+                if lvl >= 9:
+                    clean_critical.append(event_dict)
+                elif lvl >= 6:
+                    clean_medium.append(event_dict)
+            # Prioritize critical, fill remaining budget with medium
+            clean = clean_critical[:40] + clean_medium[:15]
+            cross_corr = tool_result.get("cross_agent_correlation", [])
+            result_for_model = {
+                "instruction": (
+                    "Perform TRUE alert correlation on the events below. "
+                    "Group by attacker source IP, detect attack chains "
+                    "(recon→access→execution→lateral→exfil), identify the original "
+                    "attacker IP (not relay hops). Produce a narrative per attacker. "
+                    "Do NOT just list alerts — explain what the attacker DID. "
+                    "CRITICAL: Any src_ip labeled '[management/ansible]' is the SOC automation system — IGNORE it, never treat as attacker. "
+                    "src_ip '[local-execution]' means the attack tool ran LOCALLY on the victim host (attacker already had code execution). "
+                    "This is a critical finding — it means prior compromise. Report it as 'local attacker execution' not as a network source. "
+                    "CROSS-AGENT: If cross_agent_correlation is non-empty, the attacker IP listed there "
+                    "is the REAL originating attacker observed on the network gateway — link it to the "
+                    "local-execution events to build the full attack chain: attacker→network scan→host compromise→local execution. "
+                    "RESPONSE CHAIN: After correlating alerts, call get_incidents to show which playbooks "
+                    "SENTINEL-AI automatically executed in response. Show: alert detected → incident created → playbook run → result."
+                ),
+                "cross_agent_correlation": cross_corr,
+                "mitre_summary": tool_result.get("mitre_summary", [])[:6],
+                "security_events": clean[:50],
+            }
 
         content_str = json.dumps(result_for_model, default=str)
-        if len(content_str) > 8000:
-            content_str = content_str[:8000] + "...(truncated)"
+        if len(content_str) > 10000:
+            content_str = content_str[:10000] + "...(truncated)"
 
         # UI-friendly result (cap at 10 alerts)
         result_for_ui = tool_result
@@ -357,7 +443,7 @@ def _execute_tool_calls(
                 "total":       tool_result.get("total"),
                 "returned":    tool_result.get("returned"),
                 "digest":      tool_result.get("digest"),
-                "alerts":      tool_result.get("alerts", [])[:10],
+                "alerts":      tool_result.get("alerts", [])[:50],
             }
             if "hint" in tool_result:
                 result_for_ui["hint"] = tool_result["hint"]

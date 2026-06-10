@@ -475,6 +475,24 @@ class ChatEngine:
                         "index": "",
                         "id": "",
                     })
+                # Vulnerability packages — each package becomes a clickable ref
+                packages = result.get("packages") or []
+                for p in packages[:20]:
+                    sev_icon = {"Critical":"🔴","High":"🟠","Medium":"🟡","Low":"🟢"}.get(p.get("worst_severity",""),"⚪")
+                    refs.append({
+                        "source": "vuln_pkg",
+                        "label": f"{p.get('package','?')} {p.get('version','')}".strip(),
+                        "detail": f"{sev_icon} {p.get('worst_severity','?')} | {p.get('cve_count',0)} CVEs | Max CVSS: {p.get('max_cvss','?')}",
+                        "timestamp": "",
+                        "index": "",
+                        "id": "",
+                        "cves": p.get("cves", []),
+                        "package":        p.get("package",""),
+                        "version":        p.get("version",""),
+                        "worst_severity": p.get("worst_severity",""),
+                        "max_cvss":       p.get("max_cvss",""),
+                        "cve_count":      p.get("cve_count",0),
+                    })
 
         return refs
 
