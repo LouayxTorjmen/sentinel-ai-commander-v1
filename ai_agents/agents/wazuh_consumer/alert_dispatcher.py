@@ -252,10 +252,63 @@ def _decode(raw: Any) -> dict | None:
     return None
 
 
+async def _catchup_missed_alerts(orchestrator) -> None:
+    """On startup, replay high-priority alerts from OpenSearch that fired
+    while the dispatcher was down. Looks back CATCHUP_WINDOW minutes."""
+    import os
+    catchup_minutes = int(os.getenv("DISPATCH_CATCHUP_MINUTES", "30"))
+    if catchup_minutes <= 0:
+        return
+    try:
+        from ai_agents.rag.agent_tools import _get_client
+        # High-priority rules to catch up on — mirrors STATIC_RULE_MAP keys
+        priority_rules = [
+            "100534","100535","100536",  # AD-CS ESC1
+            "100710","100711",            # Kerberoasting
+            "100114","100115",            # Falco sensitive reads
+            "100411","100412",            # DoH exfiltration
+            "100610","100611",            # MySQL credential
+            "100810",                     # FTP exfil
+            "31103","31152",              # SQL injection
+            "92213",                      # Malware drop
+        ]
+        wc = _get_client()
+        data = wc._indexer_request(
+            "POST", "/wazuh-alerts-4.x-*/_search",
+            json={
+                "size": 100,
+                "sort": [{"@timestamp": {"order": "asc"}}],
+                "query": {"bool": {"must": [
+                    {"terms": {"rule.id": [str(r) for r in priority_rules]}},
+                    {"range": {"@timestamp": {"gte": f"now-{catchup_minutes}m"}}},
+                ]}},
+                "_source": True,
+            },
+            headers={"Content-Type": "application/json"},
+        )
+        hits = data.get("hits", {}).get("hits", [])
+        if not hits:
+            logger.info("alert_dispatcher.catchup_none", minutes=catchup_minutes)
+            return
+        logger.info("alert_dispatcher.catchup_start",
+                    count=len(hits), minutes=catchup_minutes)
+        for h in hits:
+            alert = h.get("_source", {})
+            try:
+                await orchestrator.process(alert)
+            except Exception as exc:
+                logger.warning("alert_dispatcher.catchup_error", exc=str(exc))
+        logger.info("alert_dispatcher.catchup_done", replayed=len(hits))
+    except Exception as exc:
+        logger.warning("alert_dispatcher.catchup_failed", exc=str(exc))
+
+
 async def dispatch_alerts(orchestrator) -> None:
     """Background task: forever consume Redis pubsub messages and
     dispatch each alert to the orchestrator."""
     redis = get_redis()
+    # Catch up on missed alerts from before this startup
+    await _catchup_missed_alerts(orchestrator)
     pubsub = redis.subscribe(ALERT_CHANNEL)
     logger.info("alert_dispatcher.started", channel=ALERT_CHANNEL,
                 min_level=DISPATCH_MIN_LEVEL)
