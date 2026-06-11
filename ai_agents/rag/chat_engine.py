@@ -324,9 +324,19 @@ class ChatEngine:
             if agent_chat.is_enabled():
                 # Agentic ReAct path: LLM gets seed context + tools and may
                 # iteratively call tools before producing its final answer.
+                # Only pass seed_context for general questions
+                # For tool-dependent queries, pass empty seed to force tool calls
+                import re as _re_seed
+                _tool_keywords = ['incident', 'alert', 'agent', 'cve', 'vulnerability',
+                                   'playbook', 'block', 'fim', 'rule', 'sca', 'signature',
+                                   'kerberoast', 'attack', 'malware', 'exfil', 'scan',
+                                   'panoramic', 'happening', 'status', 'what is going on']
+                _q_lower = question.lower()
+                _needs_tools = any(kw in _q_lower for kw in _tool_keywords)
+                _effective_seed = "" if _needs_tools else context_str
                 agentic_result = agent_chat.run_agentic_chat(
                     question=question,
-                    seed_context=context_str,
+                    seed_context=_effective_seed,
                     conversation_summary=summary_context,
                     lm=lm,
                 )

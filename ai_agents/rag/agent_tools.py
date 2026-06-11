@@ -696,12 +696,34 @@ def get_incident_details(incident_id: str) -> Dict[str, Any]:
             analysis_str = (r.analysis or "").strip()
             if not analysis_str:
                 analysis_str = f"Phase 2 auto-dispatch: {r.recommended_action} triggered by rule {r.rule_id}"
+            _PLAYBOOK_ACTIONS = {
+                "win_incident_response":  "collected forensic evidence (process snapshot, network connections, Security+System event logs, evidence manifest) on the Windows host",
+                "incident_response":      "collected forensic evidence (process list, network state, auth logs) and notified SOC on the Linux host",
+                "block_ip":               "added iptables DROP rule for the attacker IP on the target host",
+                "win_block_ip":           "added Windows Firewall inbound block rule for the attacker IP",
+                "block_adcs_abuse":       "unpublished the vulnerable AD-CS certificate template and revoked the issued certificate",
+                "mysql_credential_response": "revoked DVWA SELECT privilege on infra_credentials table and blocked 10.50.0.12:3306 via iptables on srv-sql",
+                "block_dns_exfil":        "blocked the DoH endpoint and null-routed the exfiltration domain on srv-dns-bind",
+                "fim_restore_response":   "restored the modified file from backup and terminated the offending process",
+                "win_fim_restore_response": "restored the modified file and logged modification details on the Windows host",
+            }
+            _pb_desc = _PLAYBOOK_ACTIONS.get(r.playbook_executed or "", "executed automated response actions")
+            _pb_result_str = ""
+            if r.playbook_result:
+                try:
+                    _pr = r.playbook_result if isinstance(r.playbook_result, dict) else {}
+                    _changed = _pr.get("changed", {})
+                    if _changed:
+                        _pb_result_str = f" — changed {sum(_changed.values()) if isinstance(_changed, dict) else _changed} item(s)"
+                except Exception:
+                    pass
             result["formatted"] = (
                 f"**Incident {str(r.id)[:8]}** — {r.severity} / {r.status}\n"
                 f"- **Rule:** {r.rule_id} — {r.rule_description}\n"
                 f"- **Source IP:** {r.source_ip or '—'}\n"
                 f"- **MITRE:** {mitre_str}\n"
-                f"- **Playbook executed:** {r.playbook_executed or '—'}\n"
+                f"- **Playbook executed:** {r.playbook_executed or '—'}{_pb_result_str}\n"
+                f"- **Actions taken:** {_pb_desc}\n"
                 f"- **Analysis:** {analysis_str[:400]}\n"
                 f"- **Created:** {r.created_at.isoformat()[:19].replace('T',' ') if r.created_at else '—'} UTC"
             )
@@ -3033,18 +3055,8 @@ def query_knowledge_base(
                         except Exception as _nvd_e:
                             logger.debug("nvd_enrich_failed: %s", _nvd_e)
 
-                lines = [f"**CVE Cache** — {len(results)} result(s) for '{search_term}'\n"]
-                for r in results:
-                    cvss = str(r["cvss_score"]) if r["cvss_score"] else "N/A"
-                    lines.append(f"**{r['cve_id']}** — {r['severity']} | CVSS {cvss}")
-                    lines.append(f"  {r.get('description') or '—'}")
-                    lines.append("")
-                lines.append("---")
-                lines.append("INSTRUCTION: The above is a factual anchor from the local cache.")
-                lines.append("Now elaborate using your own knowledge: explain the vulnerability type,")
-                lines.append("attack vector, real-world impact, affected software context, exploitation")
-                lines.append("difficulty, and concrete remediation steps. Do NOT just repeat the description.")
-                return {"found": True, "results": results, "formatted": "\n".join(lines)}
+                return {"found": True, "results": results,
+                        "instruction": "Elaborate on this CVE. Explain: vulnerability type, attack vector, real-world impact, exploitation difficulty, remediation steps."}
 
             elif query_type == "ioc":
                 q = db.query(ThreatIntelCache)

@@ -160,7 +160,7 @@ SYSTEM_PROMPT = """You are SENTINEL-AI, an autonomous SOC analyst. Be concise an
 RESPONSE FORMAT:
 - No preamble, no closing remarks
 - Single facts: just state them
-- If a tool result contains a 'formatted' field, you MUST output it EXACTLY as-is — DO NOT print raw JSON, DO NOT summarize, DO NOT restructure. The formatted field IS your entire response for that tool call.
+- If a tool result contains a 'formatted' field, use it as your factual base. For CVE/IOC results: elaborate with your own knowledge (vulnerability type, attack vector, impact, remediation). For alert/incident results: output the formatted field as-is.
 - For search_alerts results: table with columns Occurrences | Timestamp (UTC) | Rule | Description | Agent. Omit Occurrences if all=1. Omit src_ip/dst_ip if all null.
 - NEVER invent timestamps, rule IDs, or data not present in the tool result.
 - Tables: show ALL rows when displaying unique alert types or signatures. Max 10 rows only for raw event listings.
@@ -664,10 +664,59 @@ def _run_openai_compat(
             provider, iteration, finish_reason, len(raw_tool_calls), len(assistant_content),
         )
 
-        # No tool calls → final answer
+        # No tool calls → two-phase: reason first, then answer
         if not raw_tool_calls or finish_reason == "stop":
+            # Phase 1: reasoning pass (no tools, pure thinking)
+            try:
+                reasoning_msgs = messages + [{
+                    "role": "user",
+                    "content": "Before writing your final answer, reason step by step about the security data and tool results above. Think through the key findings, correlations, and what matters most. Output ONLY your reasoning — no final answer yet."
+                }]
+                r1 = requests.post(
+                    api_url,
+                    headers=headers,
+                    json={"model": model, "messages": reasoning_msgs, "max_tokens": 800, "temperature": 0.2},
+                    timeout=HTTP_TIMEOUT,
+                )
+                _r1_raw = (r1.json().get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+                # Strip any thought tags the model may have emitted in Phase 1
+                import re as _re
+                reasoning = _re.sub(r'</?thought>', '', _r1_raw).strip()
+            except Exception:
+                reasoning = ""
+
+            # Phase 2: answer pass — model sees tool results + reasoning as system context
+            try:
+                clean_reasoning = reasoning.replace("<thought>","").replace("</thought>","").strip() if reasoning else ""
+                # Strip Phase 1 prompt, inject reasoning as system msg so model synthesizes not echoes
+                phase2_msgs = [m for m in messages if not (m.get("role")=="user" and "reason step by step" in m.get("content",""))]
+                if clean_reasoning:
+                    phase2_msgs = [phase2_msgs[0], {"role":"system","content":"Internal analysis: "+clean_reasoning[:600]}] + phase2_msgs[1:]
+                phase2_msgs.append({"role":"user","content":"Write a concise, well-structured security analyst answer using a markdown table where appropriate. Choose sections based on the actual content — do NOT apply a fixed template. For incidents: summarize what happened, the threat, and the response taken. For CVEs: cover the vulnerability, impact, and remediation. For alerts/correlations: narrate the attack chain. Use your judgment on structure. No preamble."})
+                answer_msgs = phase2_msgs
+                r2 = requests.post(
+                    api_url,
+                    headers=headers,
+                    json={"model": model, "messages": answer_msgs, "max_tokens": 1500, "temperature": 0.2},
+                    timeout=HTTP_TIMEOUT,
+                )
+                _r2_raw = (r2.json().get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+                import re as _re2
+                # Strip any thought tags from Phase 2 — only Phase 1 reasoning goes in thought block
+                final_answer = _re2.sub(r'<thought>[\s\S]*?</thought>', '', _r2_raw).strip()
+                final_answer = _re2.sub(r'</?thought>', '', final_answer).strip()
+            except Exception:
+                final_answer = assistant_content.strip()
+
+            # Combine: wrap reasoning in thought tags, append answer
+            if reasoning:
+                combined = "<thought>" + reasoning + "</thought>\n\n" + (final_answer or assistant_content.strip())
+
+            else:
+                combined = final_answer or assistant_content.strip() or "(empty response)"
+
             return {
-                "answer":     assistant_content.strip() or "(empty response)",
+                "answer":     combined,
                 "tool_calls": tool_calls_log,
                 "iterations": iteration,
             }
