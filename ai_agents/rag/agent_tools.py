@@ -3039,6 +3039,11 @@ def query_knowledge_base(
                     lines.append(f"**{r['cve_id']}** — {r['severity']} | CVSS {cvss}")
                     lines.append(f"  {r.get('description') or '—'}")
                     lines.append("")
+                lines.append("---")
+                lines.append("INSTRUCTION: The above is a factual anchor from the local cache.")
+                lines.append("Now elaborate using your own knowledge: explain the vulnerability type,")
+                lines.append("attack vector, real-world impact, affected software context, exploitation")
+                lines.append("difficulty, and concrete remediation steps. Do NOT just repeat the description.")
                 return {"found": True, "results": results, "formatted": "\n".join(lines)}
 
             elif query_type == "ioc":

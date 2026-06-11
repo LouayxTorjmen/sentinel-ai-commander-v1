@@ -39,13 +39,13 @@ OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "mistral:7b")
 
 # ── Cerebras config ───────────────────────────────────────────────────────────
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
-CEREBRAS_MODEL   = os.getenv("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
+CEREBRAS_MODEL   = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
 CEREBRAS_API_URL = "https://api.cerebras.ai/v1/chat/completions"
 CEREBRAS_THINKING_DISABLED = {"type": "disabled"}  # prevents reasoning tokens in output
 
 # ── Groq config ───────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 MAX_ITERATIONS = int(os.getenv("AGENTIC_CHAT_MAX_ITERATIONS", "5"))
@@ -584,6 +584,12 @@ def _run_openai_compat(
         model     = GROQ_MODEL
 
     tools_schema = _build_tools_schema()
+    # Groq gpt-oss-120b supports native browser_search (server-side, free in beta)
+    if provider == "groq" and "gpt-oss" in model:
+        tools_schema = tools_schema + [{"type": "browser_search"}]
+    # Groq gpt-oss-120b supports native browser_search (server-side, free in beta)
+    if provider == "groq" and "gpt-oss" in model:
+        tools_schema = tools_schema + [{"type": "browser_search"}]
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type":  "application/json",
