@@ -229,6 +229,13 @@ agent_inventory — use when:
 get_sca_results — use when:
   • CIS benchmark / hardening compliance for an agent
 
+query_knowledge_base — use when:
+  • User asks about a specific CVE ID (e.g. "describe CVE-2026-46243", "what is CVE-2026-...")
+  • User asks about a previously seen IP reputation ("is 185.x.x.x malicious?")
+  • User asks about past attack correlations ("what attacks from 10.70.0.10 have we seen before?")
+  • APIs are down and cached data is needed
+  • ALWAYS try this BEFORE saying "no data available" for CVEs or IOCs
+
 gather_alert_context — use when:
   • "what's happening on host X", "panoramic view", "give me a summary of activity"
   • "what is going on right now", "overview of recent activity on agent X"

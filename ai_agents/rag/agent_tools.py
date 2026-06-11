@@ -1083,14 +1083,22 @@ def get_agent_vulnerabilities(
                 vuln = src.get("vulnerability", {})
                 pkg = src.get("package", {})
                 score = vuln.get("score", {})
-                cvss = score.get("base") if isinstance(score, dict) else score
+                cvss_raw = score.get("base") if isinstance(score, dict) else score
+                cvss = cvss_raw if (cvss_raw is not None and cvss_raw > 0) else None
+                _raw_desc = vuln.get("description") or ""
+                _prefix = "In the Linux kernel, the following vulnerability has been resolved:"
+                _raw_stripped = _raw_desc.lstrip("(").strip()
+                if _raw_stripped.startswith(_prefix):
+                    _title = _raw_stripped[len(_prefix):].strip().rstrip(")")
+                else:
+                    _title = _raw_desc
                 vulns.append({
                     "cve_id":     vuln.get("id"),
-                    "severity":   vuln.get("severity"),
+                    "severity":   vuln.get("severity") or "Unrated",
                     "cvss_score": cvss,
                     "package":    pkg.get("name") or b.get("key"),
                     "version":    pkg.get("version"),
-                    "title":      vuln.get("description") or "",
+                    "title":      _title,
                 })
         from collections import Counter
         sev_counts = Counter(v["severity"] for v in vulns if v.get("severity") and v["severity"] not in ("-","None","none","N/A",""))
@@ -1127,8 +1135,40 @@ def get_agent_vulnerabilities(
             "|---|---|---|---|---|"
         ]
         for p in packages_summary[:20]:
-            rows.append(f"| {p['package']} | {p['version']} | {p['cve_count']} | {p.get('worst_severity','?')} | {p['max_cvss']} |")
+            cvss_str = str(p['max_cvss']) if p.get('max_cvss') and p['max_cvss'] > 0 else 'N/A'
+            rows.append(f"| {p['package']} | {p['version']} | {p['cve_count']} | {p.get('worst_severity','?')} | {cvss_str} |")
         fmt = "\n".join(rows)
+        # Write-through cache to cve_records (upsert — skip if already exists)
+        try:
+            from ai_agents.database.db_manager import get_db
+            from ai_agents.database.models import CVERecord
+            seen_ids = set()
+            with get_db() as db:
+                for v in vulns:
+                    cid = v.get("cve_id")
+                    if not cid or cid in seen_ids: continue
+                    seen_ids.add(cid)
+                    existing = db.query(CVERecord).filter(CVERecord.cve_id == cid).first()
+                    if existing:
+                        # Update description/score if we have better data
+                        if v.get("title") and not existing.description:
+                            existing.description = v["title"]
+                        if v.get("cvss_score") and v["cvss_score"] > 0:
+                            existing.cvss_score = v["cvss_score"]
+                        if v.get("severity") and v["severity"] != "Unrated":
+                            existing.severity = v["severity"]
+                    else:
+                        db.add(CVERecord(
+                            cve_id            = cid,
+                            description       = v.get("title") or "",
+                            cvss_score        = v.get("cvss_score") if v.get("cvss_score") and v["cvss_score"] > 0 else None,
+                            severity          = v.get("severity") or "Unrated",
+                            affected_products = [{"package": v.get("package"), "version": v.get("version")}],
+                        ))
+                db.commit()
+        except Exception as _ce:
+            logger.debug("cve_cache_write_failed: %s", _ce)
+
         return {
             "agent_name":       agent_name,
             "total":            total,
@@ -2631,6 +2671,30 @@ def gather_alert_context(
         except Exception as _fh_exc:
             logger.warning("gather_alert_context.foothold: %s", _fh_exc)
 
+    # Write-through cache to correlated_incidents
+    try:
+        import uuid as _uuid3
+        from ai_agents.database.db_manager import get_db as _get_db3
+        from ai_agents.database.models import CorrelatedIncident
+        with _get_db3() as _db3:
+            for _ca in cross_agent_context:
+                _aip = _ca.get("attacker_ip","")
+                if not _aip: continue
+                _mids = [_m.get("technique_id","") for _m in mitre_summary[:3] if _m]
+                for _mid in (_mids or [""]):
+                    _db3.add(CorrelatedIncident(
+                        id                  = f"CORR-{int(datetime.utcnow().timestamp())}-{_uuid3.uuid4().hex[:6]}",
+                        shared_ip           = _aip,
+                        combined_severity   = "high",
+                        mitre_technique_id  = _mid or None,
+                        mitre_technique_name= next((_m.get("technique_name") for _m in mitre_summary if _m.get("technique_id")==_mid), None),
+                        attack_narrative    = _ca.get("note",""),
+                        recommended_response= "investigate",
+                        created_at          = datetime.utcnow(),
+                    ))
+            _db3.commit()
+    except Exception as _corr_e:
+        logger.debug("correlated_incidents_write_failed: %s", _corr_e)
     return {
         "summary": {
             "total_raw_alerts":   total_raw,
@@ -2854,6 +2918,33 @@ def enrich_ioc(
     results["source"]        = "direct_parallel"
     results["ip_intel"]      = ip_intel
     results["verdict"]       = verdict
+    # Write-through cache to threat_intel_cache
+    try:
+        import uuid as _uuid2
+        from datetime import timedelta
+        from ai_agents.database.db_manager import get_db
+        from ai_agents.database.models import ThreatIntelCache
+        ioc_val = ip or file_hash or domain or ""
+        ioc_t   = "ip" if ip else ("hash" if file_hash else "domain")
+        with get_db() as db:
+            existing = db.query(ThreatIntelCache).filter(
+                ThreatIntelCache.ioc_value == ioc_val
+            ).first()
+            if existing:
+                existing.threat_data = results
+                existing.expires_at  = datetime.utcnow() + timedelta(hours=24)
+            else:
+                db.add(ThreatIntelCache(
+                    id         = str(_uuid2.uuid4()),
+                    ioc_type   = ioc_t,
+                    ioc_value  = ioc_val,
+                    threat_data= results,
+                    source     = "enrich_ioc",
+                    expires_at = datetime.utcnow() + timedelta(hours=24),
+                ))
+            db.commit()
+    except Exception as _ie:
+        logger.debug("threat_intel_cache_write_failed: %s", _ie)
     # Build formatted verdict card
     ip = results.get("ip") or results.get("domain") or results.get("file_hash","IOC")
     sources_summary = []
@@ -2871,6 +2962,107 @@ def enrich_ioc(
     return results
 
 
+
+def query_knowledge_base(
+    query_type: str,
+    search_term: Optional[str] = None,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """Query the local PostgreSQL knowledge base for cached security data.
+    Use this when APIs are unavailable, or to look up previously seen data.
+    query_type options:
+      - 'cve': look up CVE details by ID or keyword (e.g. 'CVE-2026-46243', 'openssl')
+      - 'ioc': look up threat intel for an IP/hash/domain (e.g. '185.220.101.42')
+      - 'correlations': look up past attack correlations by IP or MITRE technique
+      - 'vulnerabilities': list cached vulnerable packages for an agent
+    search_term: CVE ID, IP address, package name, or keyword to search for.
+    limit: max results to return (default 10).
+    """
+    from ai_agents.database.db_manager import get_db
+    from ai_agents.database.models import CVERecord, ThreatIntelCache, CorrelatedIncident
+    try:
+        with get_db() as db:
+            if query_type == "cve":
+                q = db.query(CVERecord)
+                if search_term:
+                    if search_term.upper().startswith("CVE-"):
+                        q = q.filter(CVERecord.cve_id == search_term.upper())
+                    else:
+                        q = q.filter(CVERecord.description.ilike(f"%{search_term}%"))
+                rows = q.limit(limit).all()
+                results = [{
+                    "cve_id":      r.cve_id,
+                    "severity":    r.severity or "Unrated",
+                    "cvss_score":  r.cvss_score if r.cvss_score and r.cvss_score > 0 else None,
+                    "description": r.description or "—",
+                    "packages":    r.affected_products or [],
+                } for r in rows]
+                if not results:
+                    return {"found": False, "message": f"No cached data for '{search_term}'", "formatted": f"No cached CVE data found for '{search_term}'. Try running get_agent_vulnerabilities first to populate the cache."}
+                lines = [f"**CVE Cache** — {len(results)} result(s) for '{search_term}'\n"]
+                for r in results:
+                    cvss = str(r["cvss_score"]) if r["cvss_score"] else "N/A"
+                    lines.append(f"**{r['cve_id']}** — {r['severity']} | CVSS {cvss}")
+                    lines.append(f"  {(r['description'] or '—')[:300]}")
+                    lines.append("")
+                return {"found": True, "results": results, "formatted": "\n".join(lines)}
+
+            elif query_type == "ioc":
+                q = db.query(ThreatIntelCache)
+                if search_term:
+                    q = q.filter(ThreatIntelCache.ioc_value == search_term)
+                rows = q.order_by(ThreatIntelCache.created_at.desc()).limit(limit).all()
+                results = [{
+                    "ioc_type":   r.ioc_type,
+                    "ioc_value":  r.ioc_value,
+                    "verdict":    (r.threat_data or {}).get("verdict","UNKNOWN"),
+                    "threat_data": r.threat_data,
+                    "cached_at":  r.created_at.isoformat() if r.created_at else None,
+                } for r in rows]
+                if not results:
+                    return {"found": False, "message": f"No cached threat intel for '{search_term}'", "formatted": f"No cached IOC data for '{search_term}'. Try enrich_ioc first."}
+                r = results[0]
+                verdict = r["verdict"]
+                icon = {"MALICIOUS":"🔴","SUSPICIOUS":"🟡","CLEAN":"🟢","LEGITIMATE_SERVICE":"🟢"}.get(verdict,"⚪")
+                fmt = f"**{icon} {verdict}** — `{r['ioc_value']}` (cached {(r['cached_at'] or '')[:10]})"
+                return {"found": True, "results": results, "formatted": fmt}
+
+            elif query_type == "correlations":
+                q = db.query(CorrelatedIncident)
+                if search_term:
+                    q = q.filter(
+                        (CorrelatedIncident.shared_ip == search_term) |
+                        (CorrelatedIncident.mitre_technique_id.ilike(f"%{search_term}%")) |
+                        (CorrelatedIncident.attack_narrative.ilike(f"%{search_term}%"))
+                    )
+                rows = q.order_by(CorrelatedIncident.created_at.desc()).limit(limit).all()
+                results = [{
+                    "id":               r.id,
+                    "attacker_ip":      r.shared_ip,
+                    "severity":         r.combined_severity,
+                    "mitre_technique":  r.mitre_technique_id,
+                    "technique_name":   r.mitre_technique_name,
+                    "narrative":        r.attack_narrative,
+                    "playbook":         r.ansible_playbook,
+                    "created_at":       r.created_at.isoformat() if r.created_at else None,
+                } for r in rows]
+                if not results:
+                    return {"found": False, "message": f"No past correlations for '{search_term}'", "formatted": f"No past correlation records found for '{search_term}'."}
+                lines = [f"**Past Correlations** — {len(results)} record(s) for '{search_term}'\n"]
+                for r in results:
+                    ts = (r["created_at"] or "")[:16].replace("T"," ")
+                    lines.append(f"- **{r['attacker_ip'] or '?'}** | {r['mitre_technique'] or '?'} ({r['technique_name'] or '?'}) | {ts} UTC")
+                    if r["narrative"]:
+                        lines.append(f"  {r['narrative'][:150]}")
+                return {"found": True, "results": results, "formatted": "\n".join(lines)}
+
+            else:
+                return {"error": f"Unknown query_type '{query_type}'. Use: cve, ioc, correlations"}
+
+    except Exception as exc:
+        logger.warning("agent_tools.query_knowledge_base.failed: %s", exc)
+        return {"error": str(exc)}
+
 TOOLS: Dict[str, Any] = {
     "search_alerts": search_alerts,
     "count_alerts": count_alerts,
@@ -2884,6 +3076,7 @@ TOOLS: Dict[str, Any] = {
     # ── Phase 3 additions ─────────────────────────────────────────────
     "get_agent_details":         get_agent_details,
     "get_agent_vulnerabilities": get_agent_vulnerabilities,
+    "query_knowledge_base":     query_knowledge_base,
     "get_wazuh_rule":            get_wazuh_rule,
     "get_fim_events":            get_fim_events,
     "execute_playbook":          execute_playbook,

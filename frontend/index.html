@@ -454,7 +454,7 @@ function openVulnPkg(ref){try{
   var pkg=ref.package||'?';
   var ver=ref.version||'';
   var cves=ref.cves||[];
-  var sev_colors={'Critical':'#f87171','High':'#fb923c','Medium':'#fbbf24','Low':'#4ade80'};
+  var sev_colors={'Critical':'#f87171','High':'#fb923c','Medium':'#fbbf24','Low':'#4ade80','Unrated':'#94a3b8'};
   var sc_pkg=sev_colors[ref.worst_severity||'']||'#94a3b8';
   var overlay=document.createElement('div');
   overlay.className='modal-overlay';overlay.id='doc-modal';
@@ -474,12 +474,12 @@ function openVulnPkg(ref){try{
     html+='style="display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;background:#0f172a;user-select:none">';
     html+='<span style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'+sc+';min-width:170px">'+escHtml(v.cve_id||'—')+'</span>';
     html+='<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:'+sc+'22;color:'+sc+';font-weight:600">'+escHtml(v.severity||'—')+'</span>';
-    html+='<span style="font-size:11px;color:#64748b;margin-left:auto">CVSS <b style="color:#cbd5e1">'+escHtml(String(v.cvss_score||'—'))+'</b></span>';
+    html+='<span style="font-size:11px;color:#64748b;margin-left:auto">CVSS <b style="color:#cbd5e1">'+escHtml((!v.cvss_score||v.cvss_score===-1||v.cvss_score<0)?'N/A':String(v.cvss_score))+'</b></span>';
     html+='<span class="va" style="color:#475569;font-size:9px;margin-left:8px">\u25bc</span>';
     html+='</div>';
     // CVE body — description, hidden by default
     html+='<div id="'+cid+'" style="display:none;padding:12px 16px;background:#070b12;border-top:1px solid #1e293b">';
-    html+='<p style="margin:0;font-size:13px;color:#f1f5f9;line-height:1.75;font-weight:400;letter-spacing:0.01em">'+escHtml(v.title||'No description available.')+'</p>';
+    html+=var desc=v.title||'No description available.';var truncNote=desc.endsWith('...')||desc.length<50?'<br><span style="color:#64748b;font-size:11px">(Description truncated by vendor — check NVD for full details)</span>':'';html+='<p style="margin:0;font-size:13px;color:#f1f5f9;line-height:1.75;font-weight:400;letter-spacing:0.01em">'+escHtml(desc)+truncNote+'</p>';
     html+='</div></div>';
   });
   html+='</div><div class="modal-footer"><button class="modal-btn" onclick="closeModal()">Close</button></div></div>';
