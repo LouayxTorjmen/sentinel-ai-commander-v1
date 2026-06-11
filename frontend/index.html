@@ -453,39 +453,56 @@ function openVulnPkg(ref){try{
   closeModal();
   var pkg=ref.package||'?';
   var ver=ref.version||'';
-  var cves=ref.cves||[];
+  var allCves=ref.cves||[];
+  var page=0;var pageSize=20;
   var sev_colors={'Critical':'#f87171','High':'#fb923c','Medium':'#fbbf24','Low':'#4ade80','Unrated':'#94a3b8'};
   var sc_pkg=sev_colors[ref.worst_severity||'']||'#94a3b8';
-  var overlay=document.createElement('div');
-  overlay.className='modal-overlay';overlay.id='doc-modal';
-  overlay.onclick=function(e){if(e.target===overlay)closeModal()};
-  var html='<div class="modal" style="max-width:740px"><div class="modal-header"><div class="modal-title">';
-  html+='<span class="modal-badge" style="background:rgba(248,113,113,0.15);color:#f87171">VULN</span>';
-  html+='<span class="modal-id" style="color:#fff">'+escHtml(pkg)+' <span style="color:#64748b;font-size:11px">v'+escHtml(ver)+'</span></span>';
-  html+='</div><button class="modal-close" onclick="closeModal()">\u2715</button></div>';
-  html+='<div class="modal-body" id="doc-modal-body" style="padding:0 16px 16px">';
-  html+='<div style="padding:12px 0 16px;color:#94a3b8;font-size:12px"><b style="color:'+sc_pkg+'">'+cves.length+'</b> CVE(s) | Worst: <b style="color:'+sc_pkg+'">'+escHtml(ref.worst_severity||'?')+'</b> | Max CVSS: <b style="color:#fff">'+escHtml(String(ref.max_cvss||'?'))+'</b></div>';
-  cves.forEach(function(v,i){
-    var sc=sev_colors[v.severity]||'#94a3b8';
-    var cid='vc'+i;
-    html+='<div style="margin-bottom:6px;border-radius:8px;overflow:hidden;border:1px solid #1e293b">';
-    // CVE header row — clickable
-    html+='<div onclick="var d=document.getElementById(\''+cid+'\');var open=d.style.display===\'block\';d.style.display=open?\'none\':\'block\';this.querySelector(\'.va\').innerHTML=open?\'\u25bc\':\'\u25b2\'" ';
-    html+='style="display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;background:#0f172a;user-select:none">';
-    html+='<span style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'+sc+';min-width:170px">'+escHtml(v.cve_id||'—')+'</span>';
-    html+='<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:'+sc+'22;color:'+sc+';font-weight:600">'+escHtml(v.severity||'—')+'</span>';
-    html+='<span style="font-size:11px;color:#64748b;margin-left:auto">CVSS <b style="color:#cbd5e1">'+escHtml((!v.cvss_score||v.cvss_score===-1||v.cvss_score<0)?'N/A':String(v.cvss_score))+'</b></span>';
-    html+='<span class="va" style="color:#475569;font-size:9px;margin-left:8px">\u25bc</span>';
-    html+='</div>';
-    // CVE body — description, hidden by default
-    html+='<div id="'+cid+'" style="display:none;padding:12px 16px;background:#070b12;border-top:1px solid #1e293b">';
-    html+=html+='<p style="margin:0;font-size:13px;color:#f1f5f9;line-height:1.75;font-weight:400;letter-spacing:0.01em">'+escHtml(v.title||'No description available.')+'</p>'+((!v.title||v.title.endsWith('...')||v.title.length<50)?'<p style="margin:4px 0 0;font-size:11px;color:#64748b">(Description truncated — check NVD for full details)</p>' : '');
-    html+='</div></div>';
-  });
-  html+='</div><div class="modal-footer"><button class="modal-btn" onclick="closeModal()">Close</button></div></div>';
-  overlay.innerHTML=html;
-  document.body.appendChild(overlay);
-  setTimeout(function(){overlay.classList.add('show')},10);
+
+  function buildModal(cves, pg){
+    var start=pg*pageSize, end=Math.min(start+pageSize, cves.length);
+    var slice=cves.slice(start,end);
+    var overlay=document.getElementById('doc-modal');
+    var isNew=!overlay;
+    if(isNew){overlay=document.createElement('div');overlay.className='modal-overlay';overlay.id='doc-modal';overlay.onclick=function(e){if(e.target===overlay)closeModal()};}
+    var html='<div class="modal" style="max-width:740px"><div class="modal-header"><div class="modal-title">';
+    html+='<span class="modal-badge" style="background:rgba(248,113,113,0.15);color:#f87171">VULN</span>';
+    html+='<span class="modal-id" style="color:#fff">'+escHtml(pkg)+' <span style="color:#64748b;font-size:11px">v'+escHtml(ver)+'</span></span>';
+    html+='</div><button class="modal-close" onclick="closeModal()">\u2715</button></div>';
+    html+='<div class="modal-body" id="doc-modal-body" style="padding:0 16px 16px">';
+    html+='<div style="padding:12px 0 16px;color:#94a3b8;font-size:12px"><b style="color:'+sc_pkg+'">'+cves.length+'</b> CVE(s) | Worst: <b style="color:'+sc_pkg+'">'+escHtml(ref.worst_severity||'?')+'</b> | Max CVSS: <b style="color:#fff">'+escHtml(String(ref.max_cvss&&ref.max_cvss>0?ref.max_cvss:'N/A'))+'</b> | Showing '+escHtml(String(start+1))+'-'+escHtml(String(end))+'</div>';
+    slice.forEach(function(v,i){
+      var sc=sev_colors[v.severity]||'#94a3b8';
+      var cid='vc'+pg+'_'+i;
+      html+='<div style="margin-bottom:6px;border-radius:8px;overflow:hidden;border:1px solid #1e293b">';
+      html+='<div onclick="var d=document.getElementById(\''+cid+'\');var open=d.style.display===\'block\';d.style.display=open?\'none\':\'block\';this.querySelector(\'.va\').innerHTML=open?\'\u25bc\':\'\u25b2\'" ';
+      html+='style="display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;background:#0f172a;user-select:none">';
+      html+='<span style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;font-weight:700;color:'+sc+';min-width:170px">'+escHtml(v.cve_id||'—')+'</span>';
+      html+='<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:'+sc+'22;color:'+sc+';font-weight:600">'+escHtml(v.severity||'Unrated')+'</span>';
+      var cvss_v=(!v.cvss_score||v.cvss_score<0)?'N/A':String(v.cvss_score);
+      html+='<span style="font-size:11px;color:#64748b;margin-left:auto">CVSS <b style="color:#cbd5e1">'+escHtml(cvss_v)+'</b></span>';
+      html+='<span class="va" style="color:#475569;font-size:9px;margin-left:8px">\u25bc</span>';
+      html+='</div>';
+      html+='<div id="'+cid+'" style="display:none;padding:12px 16px;background:#070b12;border-top:1px solid #1e293b">';
+      html+='<p style="margin:0;font-size:13px;color:#f1f5f9;line-height:1.75">'+escHtml(v.title||'No description available.')+'</p>';
+      if(!v.title||v.title.length<50)html+='<p style="margin:4px 0 0;font-size:11px;color:#64748b">(Short description — check NVD for full details)</p>';
+      html+='</div></div>';
+    });
+    // Pagination
+    if(cves.length>pageSize){
+      html+='<div style="display:flex;gap:8px;margin-top:12px;justify-content:center">';
+      if(pg>0)html+='<button onclick="window._vulnPage='+(pg-1)+';buildVulnModal(window._vulnCves,window._vulnPage)" style="padding:6px 14px;background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:6px;cursor:pointer">← Prev</button>';
+      html+='<span style="color:#64748b;font-size:12px;padding:6px 8px">Page '+(pg+1)+' / '+Math.ceil(cves.length/pageSize)+'</span>';
+      if(end<cves.length)html+='<button onclick="window._vulnPage='+(pg+1)+';buildVulnModal(window._vulnCves,window._vulnPage)" style="padding:6px 14px;background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:6px;cursor:pointer">Next →</button>';
+      html+='</div>';
+    }
+    html+='</div><div class="modal-footer"><button class="modal-btn" onclick="closeModal()">Close</button></div></div>';
+    overlay.innerHTML=html;
+    if(isNew){document.body.appendChild(overlay);setTimeout(function(){overlay.classList.add('show')},10);}
+  }
+
+  window._vulnRef=ref;window._vulnCves=allCves;window._vulnPage=0;
+  window.buildVulnModal=buildModal;
+  buildModal(allCves,0);
 }catch(e){console.error('openVulnPkg:',e);}}
 function openDoc(index,docId,source){
   if(!index||!docId){return}

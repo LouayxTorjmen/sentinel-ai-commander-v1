@@ -230,11 +230,12 @@ get_sca_results — use when:
   • CIS benchmark / hardening compliance for an agent
 
 query_knowledge_base — use when:
-  • User asks about a specific CVE ID (e.g. "describe CVE-2026-46243", "what is CVE-2026-...")
-  • User asks about a previously seen IP reputation ("is 185.x.x.x malicious?")
-  • User asks about past attack correlations ("what attacks from 10.70.0.10 have we seen before?")
+  • User asks about a specific CVE ID → query_type="cve"
+  • User asks about IP reputation from cache → query_type="ioc"
+  • User asks about past attack correlations, history from an IP, or prior incidents → query_type="correlations"
   • APIs are down and cached data is needed
   • ALWAYS try this BEFORE saying "no data available" for CVEs or IOCs
+  • For "attacks from IP X" / "have we seen X before" / "history of X" → query_type="correlations"
 
 gather_alert_context — use when:
   • "what's happening on host X", "panoramic view", "give me a summary of activity"

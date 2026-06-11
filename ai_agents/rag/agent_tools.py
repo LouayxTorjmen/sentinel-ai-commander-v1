@@ -2972,9 +2972,9 @@ def query_knowledge_base(
     Use this when APIs are unavailable, or to look up previously seen data.
     query_type options:
       - 'cve': look up CVE details by ID or keyword (e.g. 'CVE-2026-46243', 'openssl')
-      - 'ioc': look up threat intel for an IP/hash/domain (e.g. '185.220.101.42')
-      - 'correlations': look up past attack correlations by IP or MITRE technique
-      - 'vulnerabilities': list cached vulnerable packages for an agent
+      - 'ioc': look up threat intel verdict for an IP/hash/domain (e.g. '185.220.101.42') — ONLY for malicious/clean verdict
+      - 'correlations': look up PAST ATTACK HISTORY — use this for "have we seen attacks from X", "history of IP X", "prior incidents from X"
+    IMPORTANT: For questions about attack history, past incidents, or prior activity from an IP → ALWAYS use query_type='correlations', NOT 'ioc'.
     search_term: CVE ID, IP address, package name, or keyword to search for.
     limit: max results to return (default 10).
     """
@@ -2999,11 +2999,45 @@ def query_knowledge_base(
                 } for r in rows]
                 if not results:
                     return {"found": False, "message": f"No cached data for '{search_term}'", "formatted": f"No cached CVE data found for '{search_term}'. Try running get_agent_vulnerabilities first to populate the cache."}
+
+                # Enrich short descriptions from NVD API
+                import os as _os_nvd, requests as _req_nvd
+                _nvd_key = _os_nvd.getenv("NVD_API_KEY","")
+                _nvd_url = _os_nvd.getenv("NVD_API_BASE_URL","https://services.nvd.nist.gov/rest/json/cves/2.0")
+                for _r in results:
+                    _desc = _r.get("description","")
+                    _cid  = _r.get("cve_id","")
+                    if _cid and _cid.startswith("CVE-") and (not _desc or len(_desc) < 150):
+                        try:
+                            _nvd_resp = _req_nvd.get(
+                                _nvd_url,
+                                params={"cveId": _cid},
+                                headers={"apiKey": _nvd_key} if _nvd_key else {},
+                                timeout=8
+                            )
+                            if _nvd_resp.status_code == 200:
+                                _nvd_data = _nvd_resp.json()
+                                _nvd_vulns = _nvd_data.get("vulnerabilities",[])
+                                if _nvd_vulns:
+                                    _nvd_descs = _nvd_vulns[0].get("cve",{}).get("descriptions",[])
+                                    _en_desc = next((d["value"] for d in _nvd_descs if d.get("lang")=="en"), None)
+                                    if _en_desc:
+                                        _r["description"] = _en_desc
+                                        # Update cache
+                                        try:
+                                            _existing = db.query(CVERecord).filter(CVERecord.cve_id==_cid).first()
+                                            if _existing:
+                                                _existing.description = _en_desc
+                                                db.commit()
+                                        except Exception: pass
+                        except Exception as _nvd_e:
+                            logger.debug("nvd_enrich_failed: %s", _nvd_e)
+
                 lines = [f"**CVE Cache** — {len(results)} result(s) for '{search_term}'\n"]
                 for r in results:
                     cvss = str(r["cvss_score"]) if r["cvss_score"] else "N/A"
                     lines.append(f"**{r['cve_id']}** — {r['severity']} | CVSS {cvss}")
-                    lines.append(f"  {(r['description'] or '—')[:300]}")
+                    lines.append(f"  {r.get('description') or '—'}")
                     lines.append("")
                 return {"found": True, "results": results, "formatted": "\n".join(lines)}
 
