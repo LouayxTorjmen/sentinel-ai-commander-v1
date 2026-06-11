@@ -479,7 +479,7 @@ function openVulnPkg(ref){try{
     html+='</div>';
     // CVE body — description, hidden by default
     html+='<div id="'+cid+'" style="display:none;padding:12px 16px;background:#070b12;border-top:1px solid #1e293b">';
-    html+=var desc=v.title||'No description available.';var truncNote=desc.endsWith('...')||desc.length<50?'<br><span style="color:#64748b;font-size:11px">(Description truncated by vendor — check NVD for full details)</span>':'';html+='<p style="margin:0;font-size:13px;color:#f1f5f9;line-height:1.75;font-weight:400;letter-spacing:0.01em">'+escHtml(desc)+truncNote+'</p>';
+    html+=html+='<p style="margin:0;font-size:13px;color:#f1f5f9;line-height:1.75;font-weight:400;letter-spacing:0.01em">'+escHtml(v.title||'No description available.')+'</p>'+((!v.title||v.title.endsWith('...')||v.title.length<50)?'<p style="margin:4px 0 0;font-size:11px;color:#64748b">(Description truncated — check NVD for full details)</p>' : '');
     html+='</div></div>';
   });
   html+='</div><div class="modal-footer"><button class="modal-btn" onclick="closeModal()">Close</button></div></div>';
