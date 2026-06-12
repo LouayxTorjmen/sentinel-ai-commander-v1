@@ -97,7 +97,7 @@ class ChatEngine:
             logger.error("chat.list_sessions_failed: %s", e)
             return []
 
-    def get_session_messages(self, session_id: str, limit: int = 50) -> List[Dict]:
+    def get_session_messages(self, session_id: str, limit: int = 1000) -> List[Dict]:
         try:
             with get_db() as db:
                 messages = db.query(ChatMessage).filter(

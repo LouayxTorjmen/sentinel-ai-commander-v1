@@ -1,6 +1,6 @@
 ---
 - name: Pull SENTINEL-AI evidence (Linux)
-  hosts: linux_agents
+  hosts: "{{ target_hosts | default('linux_agents') }}"
   gather_facts: no
   become: true
   tasks:
@@ -36,7 +36,7 @@
       become: false
 
 - name: Pull SENTINEL-AI evidence (Windows)
-  hosts: windows_agents
+  hosts: "{{ target_hosts | default('windows_agents') }}"
   gather_facts: no
   become: false
   tasks:

@@ -17,7 +17,8 @@ RUN apt-get update && apt-get install -y \
         krb5-user \
         libkrb5-dev \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /tmp/evidence
 
 # Python deps
 COPY requirements.txt .

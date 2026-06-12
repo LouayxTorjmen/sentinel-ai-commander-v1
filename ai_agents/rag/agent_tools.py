@@ -1403,8 +1403,169 @@ _CHATBOT_ALLOWED_PLAYBOOKS = {
     "lateral_movement_response",
     "win_lateral_movement_response",
     "compromised_user_response",
+    "win_compromised_user_response",
     "malware_containment",
+    "win_malware_containment",
+    "file_quarantine_response",
+    "win_file_quarantine",
+    "permissions_restore_response",
+    "win_permissions_restore_response",
+    "vulnerability_patch",
+    "win_vulnerability_patch",
+    "fetch_evidence",
 }
+# Playbooks excluded from chatbot execution — scenario lab management only,
+# not real incident response actions:
+#   - seed_scenario_state, rollback_scenario_state (lab fixture seeding)
+#   - setup_nginx_weak_tls (vulnerable baseline setup, not a response)
+
+# Catalog: human-readable description + required extra_vars per playbook.
+# Used by the list_playbooks tool so the LLM never has to guess.
+_PLAYBOOK_CATALOG = {
+    "block_ip": {
+        "description": "Block an attacker IP via iptables DROP rule (Linux).",
+        "required_params": ["source_ip"],
+        "platform": "Linux",
+    },
+    "incident_response": {
+        "description": "Collect forensic evidence (processes, network, auth logs) and notify SOC (Linux).",
+        "required_params": [],
+        "platform": "Linux",
+    },
+    "win_incident_response": {
+        "description": "Collect forensic evidence (process snapshot, network connections, Security+System event logs, manifest) and notify SOC (Windows).",
+        "required_params": [],
+        "platform": "Windows",
+    },
+    "fim_restore_response": {
+        "description": "Restore a file modified/created by an attacker from backup and terminate the offending process (Linux).",
+        "required_params": [],
+        "platform": "Linux",
+    },
+    "win_fim_restore_response": {
+        "description": "Restore a modified file from backup and log modification details (Windows).",
+        "required_params": [],
+        "platform": "Windows",
+    },
+    "harden_nginx_tls": {
+        "description": "Harden nginx TLS configuration — disable weak ciphers/protocols on the web server (Linux).",
+        "required_params": [],
+        "platform": "Linux",
+    },
+    "mysql_credential_response": {
+        "description": "Revoke exposed DB privileges (e.g. DVWA SELECT on infra_credentials) and block the attacker IP on MySQL port 3306 (Linux).",
+        "required_params": ["source_ip"],
+        "platform": "Linux",
+    },
+    "block_adcs_abuse": {
+        "description": "Unpublish a vulnerable AD-CS certificate template and revoke issued certificates (Windows AD).",
+        "required_params": ["ca_name", "template_name"],
+        "platform": "Windows",
+    },
+    "block_dns_exfil": {
+        "description": "Block a DoH exfiltration endpoint and null-route the exfil domain (Linux DNS server).",
+        "required_params": [],
+        "platform": "Linux",
+    },
+    "brute_force_response": {
+        "description": "Block an IP performing brute-force login attempts via iptables (Linux).",
+        "required_params": ["source_ip"],
+        "platform": "Linux",
+    },
+    "win_brute_force_response": {
+        "description": "Block an IP performing brute-force login attempts via Windows Firewall (Windows).",
+        "required_params": ["source_ip"],
+        "platform": "Windows",
+    },
+    "lateral_movement_response": {
+        "description": "Collect evidence and block a lateral-movement source IP via iptables (Linux).",
+        "required_params": ["source_ip"],
+        "platform": "Linux",
+    },
+    "win_lateral_movement_response": {
+        "description": "Collect evidence and block a lateral-movement source IP via Windows Firewall (Windows).",
+        "required_params": ["source_ip"],
+        "platform": "Windows",
+    },
+    "compromised_user_response": {
+        "description": "Disable a compromised local/domain user account (Linux).",
+        "required_params": ["username"],
+        "platform": "Linux",
+    },
+    "win_compromised_user_response": {
+        "description": "Disable a compromised Active Directory user account (Windows AD).",
+        "required_params": ["username"],
+        "platform": "Windows",
+    },
+    "malware_containment": {
+        "description": "Kill a malicious process and quarantine its file (Linux).",
+        "required_params": [],
+        "optional_params": ["file_path", "malware_process", "malware_pid"],
+        "platform": "Linux",
+    },
+    "win_malware_containment": {
+        "description": "Collect memory evidence, kill a malicious process, and quarantine its file (Windows).",
+        "required_params": [],
+        "optional_params": ["file_path", "malware_process", "malware_pid"],
+        "platform": "Windows",
+    },
+    "file_quarantine_response": {
+        "description": "Move a specific malicious file to quarantine and collect evidence (Linux).",
+        "required_params": ["file_path"],
+        "platform": "Linux",
+    },
+    "win_file_quarantine": {
+        "description": "Move a specific malicious file to quarantine and collect evidence (Windows).",
+        "required_params": ["file_path"],
+        "platform": "Windows",
+    },
+    "permissions_restore_response": {
+        "description": "Re-enforce correct file/directory permissions on specified paths (Linux).",
+        "required_params": [],
+        "optional_params": ["custom_paths"],
+        "platform": "Linux",
+    },
+    "win_permissions_restore_response": {
+        "description": "Re-enforce correct file/directory permissions on specified paths (Windows).",
+        "required_params": [],
+        "optional_params": ["custom_paths"],
+        "platform": "Windows",
+    },
+    "vulnerability_patch": {
+        "description": "Apply a package patch for a specific CVE (Linux).",
+        "required_params": ["cve_id", "patch_packages"],
+        "platform": "Linux",
+    },
+    "win_vulnerability_patch": {
+        "description": "Apply a KB patch for a specific CVE (Windows).",
+        "required_params": ["cve_id", "patch_kb_ids"],
+        "platform": "Windows",
+    },
+    "fetch_evidence": {
+        "description": "Pull collected SENTINEL-AI evidence files and response logs from agents (Linux).",
+        "required_params": [],
+        "platform": "Linux",
+    },
+}
+
+
+def list_playbooks() -> Dict[str, Any]:
+    """List ALL automated response playbooks SENTINEL-AI can execute,
+    with a description and required parameters for each.
+    Use this when the user asks 'what playbooks can you run',
+    'show me the list of playbooks', 'what can you execute', or similar.
+    Does NOT require any parameters.
+    """
+    rows = ["| Playbook | Platform | Description | Required Params |", "|---|---|---|---|"]
+    for name, info in sorted(_PLAYBOOK_CATALOG.items()):
+        req = ", ".join(info.get("required_params", [])) or "—"
+        rows.append(f"| `{name}` | {info['platform']} | {info['description']} | {req} |")
+    fmt = f"**{len(_PLAYBOOK_CATALOG)} automated response playbooks available:**\n\n" + "\n".join(rows)
+    return {
+        "total": len(_PLAYBOOK_CATALOG),
+        "playbooks": _PLAYBOOK_CATALOG,
+        "formatted": fmt,
+    }
 
 
 def execute_playbook(
@@ -1414,6 +1575,15 @@ def execute_playbook(
     source_ip: Optional[str] = None,
     reason: Optional[str] = None,
     username: Optional[str] = None,
+    dry_run: bool = False,
+    ca_name: Optional[str] = None,
+    template_name: Optional[str] = None,
+    file_path: Optional[str] = None,
+    cve_id: Optional[str] = None,
+    patch_packages: Optional[str] = None,
+    patch_kb_ids: Optional[str] = None,
+    malware_process: Optional[str] = None,
+    malware_pid: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute an Ansible response playbook on a target host (two-phase confirmation).
     USE ONLY when the user explicitly asks to RUN/EXECUTE/BLOCK/ISOLATE something.
@@ -1423,20 +1593,40 @@ def execute_playbook(
     with confirmed=True after the user explicitly says 'confirm', 'yes',
     'do it', 'go ahead', or similar.
 
-    Available playbooks: block_ip, incident_response, win_incident_response,
-    fim_restore_response, win_fim_restore_response, harden_nginx_tls,
-    mysql_credential_response, block_adcs_abuse, block_dns_exfil,
-    brute_force_response, win_brute_force_response, lateral_movement_response,
-    win_lateral_movement_response, compromised_user_response, malware_containment.
+    Available playbooks (24 total, all platforms): block_ip,
+    incident_response, win_incident_response, fim_restore_response,
+    win_fim_restore_response, harden_nginx_tls, mysql_credential_response,
+    block_adcs_abuse, block_dns_exfil, brute_force_response,
+    win_brute_force_response, lateral_movement_response,
+    win_lateral_movement_response, compromised_user_response,
+    win_compromised_user_response, malware_containment,
+    win_malware_containment, file_quarantine_response, win_file_quarantine,
+    permissions_restore_response, win_permissions_restore_response,
+    vulnerability_patch, win_vulnerability_patch, fetch_evidence.
+    Call list_playbooks() for full descriptions if unsure which to use.
+
     Required extra params by playbook:
+    - block_ip, brute_force_response, win_brute_force_response,
+      lateral_movement_response, win_lateral_movement_response,
+      mysql_credential_response: source_ip=<attacker IP>
     - block_adcs_abuse: ca_name=SENTINEL-LAB-CA, template_name=SentinelVulnESC1
-    - compromised_user_response: username=<account to disable> — source_ip is NOT required, pass username only
-    - malware_containment: file_path=<path>, malware_process=<name>, malware_pid=<pid>
+    - compromised_user_response, win_compromised_user_response: username=<account to disable>
+    - file_quarantine_response, win_file_quarantine: file_path=<full path to malicious file>
+    - vulnerability_patch: cve_id=<CVE ID>, patch_packages=<comma-separated package names, e.g. "openssl,curl">
+    - win_vulnerability_patch: cve_id=<CVE ID>, patch_kb_ids=<comma-separated KB IDs, e.g. "KB5034441">
+    - malware_containment, win_malware_containment: malware_process=<name> and/or malware_pid=<pid> (optional)
+    - incident_response, win_incident_response, fim_restore_response,
+      win_fim_restore_response, harden_nginx_tls, permissions_restore_response,
+      win_permissions_restore_response, fetch_evidence: no extra params required
 
     playbook: name of the playbook to run.
     target_host: Wazuh agent name (e.g. 'srv-web', 'srv-ad-dns'). Never 'all'.
     confirmed: False = show confirmation prompt, True = actually execute.
     source_ip: attacker IP to block (required for block_ip and brute force playbooks).
+        CRITICAL: NEVER infer or reuse source_ip from earlier conversation turns.
+        If the user does not explicitly provide it in their current message,
+        return the error asking for it — do NOT default to any IP seen
+        previously (e.g. 10.70.0.10 from prior discussion).
     reason: why you are running this (written to the incident audit log).
     """
     # Coerce confirmed — LLMs sometimes send string "false"/"true" instead of boolean
@@ -1492,9 +1682,32 @@ def execute_playbook(
     _ip_required = {
         "block_ip", "brute_force_response", "win_brute_force_response",
         "lateral_movement_response", "win_lateral_movement_response",
+        "mysql_credential_response",
     }
     if playbook in _ip_required and not source_ip:
         return {"error": f"Playbook '{playbook}' requires source_ip (the attacker's IP address)."}
+    # Generic validation for other required params from the catalog
+    _param_values = {
+        "username": username, "ca_name": ca_name, "template_name": template_name,
+        "file_path": file_path, "cve_id": cve_id,
+        "patch_packages": patch_packages, "patch_kb_ids": patch_kb_ids,
+    }
+    _catalog_entry = _PLAYBOOK_CATALOG.get(playbook, {})
+    _missing = [p for p in _catalog_entry.get("required_params", [])
+                if p != "source_ip" and not _param_values.get(p)]
+    if _missing:
+        return {"error": f"Playbook '{playbook}' requires: {', '.join(_missing)}."}
+    # Generic validation for other required params from the catalog
+    _param_values = {
+        "username": username, "ca_name": ca_name, "template_name": template_name,
+        "file_path": file_path, "cve_id": cve_id,
+        "patch_packages": patch_packages, "patch_kb_ids": patch_kb_ids,
+    }
+    _catalog_entry = _PLAYBOOK_CATALOG.get(playbook, {})
+    _missing = [p for p in _catalog_entry.get("required_params", [])
+                if p != "source_ip" and not _param_values.get(p)]
+    if _missing:
+        return {"error": f"Playbook '{playbook}' requires: {', '.join(_missing)}."}
 
     # Safety: never block loopback or management subnet
     if source_ip:
@@ -1546,10 +1759,28 @@ def execute_playbook(
         "source_ip":    source_ip or "",
         "incident_id":  incident_id,
         "severity":     "high",
-        "dry_run":      False,
+        "dry_run":      bool(dry_run),
     }
     if source_ip:
         extra_vars["block_ip_address"] = source_ip
+    if username:
+        extra_vars["username"] = username
+    if ca_name:
+        extra_vars["ca_name"] = ca_name
+    if template_name:
+        extra_vars["template_name"] = template_name
+    if file_path:
+        extra_vars["file_path"] = file_path
+    if cve_id:
+        extra_vars["cve_id"] = cve_id
+    if patch_packages:
+        extra_vars["patch_packages"] = [p.strip() for p in patch_packages.split(",") if p.strip()]
+    if patch_kb_ids:
+        extra_vars["patch_kb_ids"] = [k.strip() for k in patch_kb_ids.split(",") if k.strip()]
+    if malware_process:
+        extra_vars["malware_process"] = malware_process
+    if malware_pid:
+        extra_vars["malware_pid"] = malware_pid
 
     try:
         resp = _req.post(
@@ -1641,14 +1872,21 @@ def get_active_blocks(
 ) -> Dict[str, Any]:
     """Check what IP blocks are currently active in the SENTINEL-AI system.
 
-    Queries the incidents database for executed block_ip and block_dns_exfil
-    playbooks. Use for 'is 10.70.0.10 blocked?', 'why was this IP banned?',
-    'what did you block today?', 'show me all active blocks'.
+    Queries the incidents database for executed block_ip/win_block_ip/
+    lateral_movement_response/etc playbooks. For 'is X blocked NOW',
+    'what is CURRENTLY blocked', 'show active blocks', 'list current
+    firewall blocks' — ALWAYS set live_check=True. This verifies each
+    historical block against live iptables (Linux) / Windows Firewall
+    rules and marks each as still_active true/false, since blocks may
+    have expired or been manually removed since they were recorded.
+
+    For 'what did you block today' (historical/audit framing), live_check
+    can be omitted (defaults False, faster).
 
     source_ip: check if a specific IP is blocked (e.g. '10.70.0.10').
     agent_name: filter blocks on a specific agent. Omit for all agents.
     time_window: '24h', '7d', '30d'. Default '7d'.
-    live_check: if True, also queries live iptables/Windows Firewall state via Ansible.
+    live_check: if True, verifies against live firewall state (adds ~10-15s).
     """
     from datetime import datetime, timedelta
     from ai_agents.database.db_manager import get_db
@@ -1703,30 +1941,130 @@ def get_active_blocks(
                     "trigger":          "chat_command" if r.rule_id == 0 else f"rule_{r.rule_id}",
                 })
 
+            # ── Optional live state check ──────────────────────────────
+            live_ips = set()
+            live_error = None
+            if live_check:
+                try:
+                    import requests as _req3
+                    from ai_agents.config import get_settings as _gs3
+                    _s3 = _gs3()
+                    _base = f"http://{_s3.ansible_runner_host}:{_s3.ansible_runner_port}"
+                    # Linux: check SENTINEL_BLOCK chain
+                    _lin = _req3.post(f"{_base}/adhoc", json={
+                        "hosts": "linux_agents", "module": "shell",
+                        "args": "iptables -L SENTINEL_BLOCK -n 2>/dev/null | grep DROP || true",
+                    }, timeout=60).json()
+                    for _host, _r in (_lin.get("hosts") or {}).items():
+                        for _line in _r.get("stdout_lines", []):
+                            import re as _re3
+                            _m = _re3.search(r"\b(\d+\.\d+\.\d+\.\d+)\b", _line)
+                            if _m:
+                                live_ips.add(_m.group(1))
+                    # Windows: check SentinelAI-Block-* firewall rules
+                    _win = _req3.post(f"{_base}/adhoc", json={
+                        "hosts": "windows_agents", "module": "win_shell",
+                        "args": 'Get-NetFirewallRule -DisplayName "SentinelAI-Block-*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DisplayName',
+                    }, timeout=60).json()
+                    for _host, _r in (_win.get("hosts") or {}).items():
+                        for _line in _r.get("stdout_lines", []):
+                            import re as _re3b
+                            _m = _re3b.search(r"SentinelAI-Block-(\d+\.\d+\.\d+\.\d+)-(in|out)", _line)
+                            if _m:
+                                live_ips.add(_m.group(1))
+                    # DNS exfil blocks: dnsdist NetmaskGroupRule entries on srv-dns-bind
+                    _dns = _req3.post(f"{_base}/adhoc", json={
+                        "hosts": "srv-dns-bind", "module": "shell",
+                        "args": "grep -oP 'addMask\\(\"[0-9.]+/' /etc/dnsdist/dnsdist.conf 2>/dev/null || true",
+                    }, timeout=60).json()
+                    for _host, _r in (_dns.get("hosts") or {}).items():
+                        for _line in _r.get("stdout_lines", []):
+                            import re as _re3c
+                            _m = _re3c.search(r"(\d+\.\d+\.\d+\.\d+)", _line)
+                            if _m:
+                                live_ips.add(_m.group(1))
+                except Exception as _live_exc:
+                    live_error = str(_live_exc)
+
             if source_ip:
                 is_blocked = any(b["blocked_ip"] == source_ip for b in blocks)
-                return {
+                result_ip = {
                     "queried_ip": source_ip,
                     "is_blocked": is_blocked,
                     "block_count": len(blocks),
                     "blocks": blocks,
                 }
+                if live_check:
+                    result_ip["currently_active_live"] = source_ip in live_ips
+                    if live_error:
+                        result_ip["live_check_error"] = live_error
+                return result_ip
+
+            valid_blocks = [b for b in blocks if b.get("blocked_ip","").strip()]
+
+            if live_check:
+                for b in valid_blocks:
+                    if "sentinel-fw" in (b.get("target_agent") or "").lower():
+                        b["still_active"] = None  # pfSense not Ansible-manageable
+                    else:
+                        b["still_active"] = b["blocked_ip"] in live_ips
+                _active = [b for b in valid_blocks if b["still_active"] is True]
+                _stale  = [b for b in valid_blocks if b["still_active"] is False]
+                _unverifiable = [b for b in valid_blocks if b["still_active"] is None]
+                header = ["| Blocked IP | Target Host | Playbook | Reason | Blocked At | Live Status |", "|---|---|---|---|---|---|"]
+                rows = list(header)
+                for b in valid_blocks:
+                    ip = b["blocked_ip"]
+                    host = b.get("target_agent","—")
+                    pb = b.get("playbook","—")
+                    reason = (b.get("reason") or "—")[:50]
+                    ts = (b.get("blocked_at") or "—")[:19].replace("T"," ")
+                    if b["still_active"] is True:
+                        live_status = "🟢 Active"
+                    elif b["still_active"] is False:
+                        live_status = "⚪ Expired/removed"
+                    else:
+                        live_status = "❓ Not verifiable (pfSense)"
+                    rows.append(f"| {ip} | {host} | {pb} | {reason} | {ts} | {live_status} |")
+                note = ""
+                if live_error:
+                    note = f"\n\n_Live check partial: {live_error}_"
+                fmt = (
+                    f"**{len(_active)} currently active block(s)** "
+                    f"({len(_stale)} historical/expired, {len(_unverifiable)} not verifiable) "
+                    f"in the last {time_window}:\n\n"
+                    + "\n".join(rows) + note
+                ) if valid_blocks else f"No block operations recorded in the last {time_window}."
+                return {
+                    "total_blocks":      len(blocks),
+                    "active_count":      len(_active),
+                    "stale_count":       len(_stale),
+                    "unverifiable_count": len(_unverifiable),
+                    "time_window":       time_window,
+                    "blocks":            blocks,
+                    "live_checked":      True,
+                    "formatted":         fmt,
+                }
 
             rows = ["| Blocked IP | Target Host | Playbook | Reason | Blocked At |", "|---|---|---|---|---|"]
-            for b in blocks:
-                ip = b.get("blocked_ip") or "—"
-                if ip == "—": continue
+            for b in valid_blocks:
+                ip = b["blocked_ip"]
                 host = b.get("target_agent","—")
                 pb = b.get("playbook","—")
                 reason = (b.get("reason") or "—")[:50]
                 ts = (b.get("blocked_at") or "—")[:19].replace("T"," ")
                 rows.append(f"| {ip} | {host} | {pb} | {reason} | {ts} |")
-            valid_blocks = [b for b in blocks if b.get("blocked_ip","").strip()]
-            fmt = f"**{len(valid_blocks)} recorded block(s)** in the last {time_window} (from SENTINEL-AI dispatch log):\n\n" + "\n".join(rows) if valid_blocks else f"No block operations recorded in the last {time_window}."
+            fmt = (
+                f"**{len(valid_blocks)} recorded block(s)** in the last {time_window} "
+                f"(from SENTINEL-AI dispatch log — historical record, not verified live; "
+                f"pass live_check=True to verify against current firewall state):\n\n"
+                + "\n".join(rows)
+            ) if valid_blocks else f"No block operations recorded in the last {time_window}."
             return {
                 "total_blocks": len(blocks),
                 "time_window":  time_window,
                 "blocks":       blocks,
+                "live_checked": False,
                 "formatted":    fmt,
             }
     except Exception as exc:
@@ -3130,6 +3468,8 @@ TOOLS: Dict[str, Any] = {
     "query_knowledge_base":     query_knowledge_base,
     "get_wazuh_rule":            get_wazuh_rule,
     "get_fim_events":            get_fim_events,
+    "list_playbooks":            list_playbooks,
+    "list_playbooks":            list_playbooks,
     "execute_playbook":          execute_playbook,
     "get_active_blocks":         get_active_blocks,
     "get_sca_results":           get_sca_results,

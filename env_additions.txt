@@ -1,0 +1,52 @@
+# =============================================================================
+# SENTINEL-AI Topology Configuration — add to .env
+# =============================================================================
+# These replace all hardcoded IP ranges and agent names in the codebase.
+# When deploying to a new environment, only these vars need to change.
+
+# ── Network subnets ───────────────────────────────────────────────────────────
+# Comma-separated CIDRs. IPs in management subnets are NEVER blocked.
+SENTINEL_MANAGEMENT_SUBNETS=10.60.0.0/24
+
+# Known red-team / attacker ranges. IPs here are treated as external threats.
+SENTINEL_ATTACKER_SUBNETS=10.70.0.0/24
+
+# ── Agent roles ───────────────────────────────────────────────────────────────
+# Exact Wazuh agent name of the network gateway / Suricata sensor.
+# Auto-detected from agent name keywords (fw, firewall, pfsense) if not set.
+SENTINEL_GATEWAY_AGENT=sentinel-fw.sentinel.lab
+
+# Comma-separated list of Wazuh agent names running Windows.
+# Falls back to Ansible inventory [windows_agents] group if not set.
+SENTINEL_WINDOWS_AGENTS=srv-ad-dns,srv-ftp
+
+# For block_ip playbooks triggered by the gateway (FreeBSD/pfSense):
+# redirect iptables execution to this Linux agent.
+# Auto-detected as first active Linux agent if not set.
+SENTINEL_FW_REDIRECT_TARGET=Ubuntu-agent-web
+
+# ── Feedback agent ────────────────────────────────────────────────────────────
+# Agent used for Wazuh rule feedback injection (wazuh_feedback.py).
+# Leave empty to disable feedback injection.
+SENTINEL_FEEDBACK_AGENT=
+
+# ── Phase 3 tuning ────────────────────────────────────────────────────────────
+PHASE3_ENABLED=true
+PHASE3_MIN_LEVEL=7
+PHASE3_DRY_RUN=false
+PHASE3_CONFIDENCE_THRESHOLD=0.6
+PHASE3_CONTEXT_WINDOW=30m
+
+# ── Topology cache ────────────────────────────────────────────────────────────
+# How long (seconds) to cache the Wazuh agent list. Default 300 (5 min).
+SENTINEL_TOPOLOGY_CACHE_TTL=300
+
+# ── AD-CS ─────────────────────────────────────────────────────────────────────
+# Certificate Authority name for block_adcs_abuse playbook.
+ADCS_CA_NAME=SENTINEL-LAB-CA
+ADCS_TEMPLATE_NAME=SentinelVulnESC1
+
+# ── MySQL credential response ─────────────────────────────────────────────────
+# MySQL root password used by mysql_credential_response.yml
+# Previously hardcoded as 'louay' in the playbook — now an env var.
+MYSQL_SCENARIO_PASSWORD=louay

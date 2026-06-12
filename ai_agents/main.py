@@ -305,7 +305,7 @@ async def list_chat_sessions(limit: int = 20):
 
 
 @app.get("/chat/sessions/{session_id}")
-async def get_session_messages(session_id: str, limit: int = 50):
+async def get_session_messages(session_id: str, limit: int = 1000):
     """Get all messages in a session."""
     return chat_engine.get_session_messages(session_id, limit)
 

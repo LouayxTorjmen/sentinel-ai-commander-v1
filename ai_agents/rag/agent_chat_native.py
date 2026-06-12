@@ -203,6 +203,17 @@ get_incidents — use when:
 
 get_active_blocks — use when:
   • "is X blocked", "what IPs are blocked", "why was X banned"
+  • For "currently"/"now"/"active" framing → ALWAYS pass live_check=True
+  • Output the 'formatted' field VERBATIM as a markdown table — it already
+    includes host, playbook, reason, timestamp, and live status per IP.
+    Do NOT extract just the IPs and list them separately.
+
+list_playbooks — use when:
+  • "what playbooks can you run/execute", "list available playbooks",
+    "what response actions are available"
+  • Takes NO parameters. ALWAYS call this tool for such questions —
+    never answer from memory or guess a partial list.
+  • Output the 'formatted' field VERBATIM as a markdown table.
 
 list_agents — use when:
   • "what agents are enrolled", "how many hosts", "agent status"
@@ -256,8 +267,19 @@ EXECUTE_PLAYBOOK RULES:
 2. Wait for explicit "confirm" / "yes" / "do it" before calling with confirmed=True
 3. Never skip the confirmation step
 4. agent_name must be exact — call list_agents() first if unsure
-5. compromised_user_response requires username= parameter
-6. block_adcs_abuse requires ca_name=SENTINEL-LAB-CA and template_name=SentinelVulnESC1
+5. NEVER infer source_ip, file_path, username, cve_id, or any other parameter
+   from earlier conversation turns — if the current message doesn't specify
+   it, the tool will return an error asking for it. Surface that error to
+   the user; do not guess a value from history.
+6. Required params per playbook (call list_playbooks() if unsure):
+   - source_ip: block_ip, brute_force_response, win_brute_force_response,
+     lateral_movement_response, win_lateral_movement_response,
+     mysql_credential_response
+   - username: compromised_user_response, win_compromised_user_response
+   - ca_name=SENTINEL-LAB-CA + template_name=SentinelVulnESC1: block_adcs_abuse
+   - file_path: file_quarantine_response, win_file_quarantine
+   - cve_id + patch_packages: vulnerability_patch
+   - cve_id + patch_kb_ids: win_vulnerability_patch
 
 TOPOLOGY:
 - Suricata runs on the GATEWAY (sentinel-fw.sentinel.lab), NOT on victim hosts
@@ -692,7 +714,7 @@ def _run_openai_compat(
                 phase2_msgs = [m for m in messages if not (m.get("role")=="user" and "reason step by step" in m.get("content",""))]
                 if clean_reasoning:
                     phase2_msgs = [phase2_msgs[0], {"role":"system","content":"Internal analysis: "+clean_reasoning[:600]}] + phase2_msgs[1:]
-                phase2_msgs.append({"role":"user","content":"Write a concise, well-structured security analyst answer using a markdown table where appropriate. Choose sections based on the actual content — do NOT apply a fixed template. For incidents: summarize what happened, the threat, and the response taken. For CVEs: cover the vulnerability, impact, and remediation. For alerts/correlations: narrate the attack chain. Use your judgment on structure. No preamble."})
+                phase2_msgs.append({"role":"user","content":"Write a concise, well-structured answer using a markdown table where appropriate. Stay focused on what THIS turn's tool results actually contain -- do not pad the answer with unrelated CVEs, incidents, or topics that happen to be in the conversation history but were not part of this turn's tool calls. If the user is asking a follow-up (e.g. \"explain more\"), continue the same topic as before. For incidents: summarize what happened, the threat, and the response taken. For CVEs: cover the vulnerability, impact, and remediation. For alerts/correlations: narrate the attack chain. No preamble."})
                 answer_msgs = phase2_msgs
                 r2 = requests.post(
                     api_url,

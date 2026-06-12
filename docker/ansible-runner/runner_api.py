@@ -251,5 +251,79 @@ def run_playbook():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/adhoc", methods=["POST"])
+def run_adhoc():
+    """Run an ad-hoc shell/win_shell module against specific hosts.
+    Body: {"hosts": "host1,host2" or "linux_agents"/"windows_agents",
+           "module": "shell" or "win_shell",
+           "args": "command string"}
+    Used for live state queries (e.g. checking active iptables/firewall
+    blocks) that don't warrant a full playbook run.
+    """
+    data = request.get_json(force=True)
+    hosts  = data.get("hosts", "all")
+    module = data.get("module", "shell")
+    args   = data.get("args", "")
+
+    if module not in ("shell", "win_shell", "ansible.builtin.shell", "ansible.windows.win_shell"):
+        return jsonify({"error": "module must be shell or win_shell"}), 400
+    if not args:
+        return jsonify({"error": "args is required"}), 400
+
+    logger.info("Running ad-hoc %s on %s: %s", module, hosts, args[:80])
+    try:
+        runner_kwargs = dict(
+            private_data_dir=RUNNER_BASE,
+            host_pattern=hosts,
+            module=module,
+            module_args=args,
+            inventory="{}/inventory/hosts.ini".format(ANSIBLE_BASE),
+            quiet=True,
+            envvars={
+                "ANSIBLE_ROLES_PATH": "/ansible/roles",
+                "ANSIBLE_CONFIG": "/ansible/ansible.cfg",
+            },
+        )
+        # win_shell is incompatible with the global sudo become setting
+        if "win" in module:
+            runner_kwargs["extravars"] = {"ansible_become": False}
+
+        result = ansible_runner.run(**runner_kwargs)
+
+        per_host = {}
+        for event in result.events:
+            ev = event.get("event", "")
+            event_data = event.get("event_data", {})
+            host = event_data.get("host")
+            if not host:
+                continue
+            res = event_data.get("res", {})
+            if ev == "runner_on_ok":
+                per_host[host] = {
+                    "ok": True,
+                    "stdout": res.get("stdout", ""),
+                    "stdout_lines": res.get("stdout_lines", []),
+                }
+            elif ev == "runner_on_unreachable":
+                per_host[host] = {"ok": False, "error": "unreachable", "stdout": ""}
+            elif ev == "runner_on_failed":
+                per_host[host] = {
+                    "ok": False,
+                    "error": res.get("msg", "failed"),
+                    "stdout": res.get("stdout", ""),
+                }
+
+        return jsonify({
+            "status": result.status,
+            "rc": result.rc,
+            "hosts": per_host,
+            "timestamp": datetime.utcnow().isoformat(),
+        }), 200
+
+    except Exception as e:
+        logger.exception("Error running adhoc command: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=False)
