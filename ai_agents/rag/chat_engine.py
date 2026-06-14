@@ -212,53 +212,15 @@ class ChatEngine:
         # Get session context
         summary, recent_messages = self._get_session_context(session_id)
 
-        # Confirm interceptor — detect bare confirm and route directly to execute_playbook
-        _confirm_words = {"confirm", "yes", "do it", "proceed", "go ahead", "execute", "run it"}
-        if question.strip().lower() in _confirm_words:
-            # Find last assistant message with a pending playbook confirmation
-            _, recent = self._get_session_context(session_id)
-            for msg in reversed(recent):
-                if msg.get("role") == "assistant":
-                    last_assistant = msg.get("content", "")
-                    _ctx = msg.get("context_summary") or {}
-                    _pending = _ctx.get("pending_confirmation")
-                    if _pending and _pending.get("token"):
-                        from ai_agents.rag.agent_tools import execute_playbook as _exec_pb
-                        self._save_message(session_id, "user", question)
-                        result = _exec_pb(
-                            playbook=_pending.get("playbook"),
-                            target_host=_pending.get("target_host"),
-                            confirmed=True,
-                            confirmation_token=_pending.get("token"),
-                            source_ip=_pending.get("source_ip") or None,
-                            reason="Analyst confirmed via chat",
-                        )
-                        if result.get("error"):
-                            answer = (
-                                f"⚠️ Could not execute: {result['error']}\n\n"
-                                "Please ask me to run the playbook again to get a fresh confirmation."
-                            )
-                        else:
-                            outcome = result.get("outcome", "")
-                            answer = f"Playbook executed.\n\n**Outcome:** {outcome}"
-                            if result.get("changed_tasks"):
-                                answer += "\n\n**Changed tasks:**"
-                                for t in result["changed_tasks"][:5]:
-                                    answer += f"\n- {t.get('outcome','')}"
-                        self._save_message(session_id, "assistant", answer,
-                            llm_provider="direct", confidence="high",
-                            sources_used="execute_playbook")
-                        return {
-                            "session_id": session_id,
-                            "answer": answer,
-                            "confidence": "high",
-                            "sources_used": ["execute_playbook"],
-                            "llm_provider": "direct",
-                            "context_summary": {},
-                        }
-                    break
+        # NOTE: the previous 'confirm' shortcut that called execute_playbook
+        # directly (bypassing the LLM) was removed. The agentic architecture
+        # requires the LLM itself to execute tools and have visibility into
+        # its own actions in its own tool-call history. 'confirm' now goes
+        # through the normal agentic loop below: the LLM sees the prior
+        # confirmation_token in conv_context (recent exchange text) and
+        # calls execute_playbook(confirmed=True, confirmation_token=...)
+        # itself, as its own visible tool call.
 
-        # Save user message
         self._save_message(session_id, "user", question)
 
         # Retrieve context from all data sources
@@ -297,6 +259,27 @@ class ChatEngine:
         summary_context = summary or "First message in this session."
         if conv_context:
             summary_context = f"{summary_context}\n\nRecent exchanges:\n{conv_context}"
+        # Surface a pending execute_playbook confirmation_token explicitly --
+        # it's stored in the previous assistant message's context_summary but
+        # may not appear in the truncated conv_context text above (it can be
+        # buried past the 600-char cutoff inside a long <thought> block).
+        # If the user's current message looks like a confirmation, give the
+        # LLM the exact token to use.
+        if recent_messages:
+            for _m in reversed(recent_messages):
+                if _m.get("role") == "assistant":
+                    _pend = (_m.get("context_summary") or {}).get("pending_confirmation")
+                    if _pend and _pend.get("token"):
+                        summary_context += (
+                            f"\n\nPENDING CONFIRMATION: playbook={_pend.get('playbook')} "
+                            f"target_host={_pend.get('target_host')} "
+                            f"source_ip={_pend.get('source_ip') or 'none'} "
+                            f"confirmation_token={_pend.get('token')}\n"
+                            "If the analyst's current message is a confirmation "
+                            "(confirm/yes/do it/etc), call execute_playbook with "
+                            "confirmed=True and this exact confirmation_token."
+                        )
+                    break
 
         # Generate answer
         try:
