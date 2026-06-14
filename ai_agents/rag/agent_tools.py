@@ -274,6 +274,38 @@ def search_alerts(
             "time_range": {"first": timestamps[0] if timestamps else None,
                            "last":  timestamps[-1] if timestamps else None},
         }
+        # ── Coverage warning ──────────────────────────────────────────
+        # When total alert volume far exceeds what's fetched, the desc-sorted
+        # + size-capped + deduplicated sample may only represent a small
+        # recent slice of the requested time_window. Warn the LLM explicitly
+        # so it doesn't claim the full window is represented.
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            _unit = time_window[-1].lower()
+            _n    = int(time_window[:-1])
+            _delta = {"m": _td(minutes=_n), "h": _td(hours=_n),
+                      "d": _td(days=_n)}.get(_unit, _td(days=7))
+            _window_seconds = _delta.total_seconds()
+            if timestamps and _window_seconds > 0:
+                _oldest = _dt.fromisoformat(timestamps[0].replace("Z", "+00:00"))
+                _newest = _dt.fromisoformat(timestamps[-1].replace("Z", "+00:00"))
+                _now = _dt.now(_oldest.tzinfo)
+                _sample_span_seconds = (_newest - _oldest).total_seconds()
+                _oldest_age_seconds = (_now - _oldest).total_seconds()
+                # If the oldest alert in the sample is much more recent than
+                # the start of the requested window, the sample doesn't cover it.
+                if total > len(alerts) * 3 and _oldest_age_seconds < _window_seconds * 0.5:
+                    result["coverage_warning"] = (
+                        f"total={total} alerts exist in the requested {time_window} window, "
+                        f"but due to high volume only the most recent activity "
+                        f"({timestamps[0]} to {timestamps[-1]}) is represented in this "
+                        f"sample (sorted by recency). This does NOT cover the full "
+                        f"{time_window} window. For aggregate counts across the full "
+                        f"window, use top_signatures instead. For correlated/grouped "
+                        f"analysis, use gather_alert_context."
+                    )
+        except Exception:
+            pass
     # Help the LLM recover from empty results — be explicit about why
     # 0 hits happened and what to try next, instead of letting the LLM
     # blindly repeat the same query.
@@ -1120,7 +1152,7 @@ def get_agent_vulnerabilities(
                     "cvss_score": cvss,
                     "package":    pkg.get("name") or b.get("key"),
                     "version":    pkg.get("version"),
-                    "title":      _title,
+                    "title":      (_title[:150] + "..." if len(_title) > 150 else _title),
                 })
         from collections import Counter
         sev_counts = Counter(v["severity"] for v in vulns if v.get("severity") and v["severity"] not in ("-","None","none","N/A",""))
@@ -1196,13 +1228,14 @@ def get_agent_vulnerabilities(
             "total":            total,
             "returned":         len(vulns),
             "severity_summary": dict(sev_counts),
-            "vulnerabilities":  vulns,
+            # NOTE: "vulnerabilities" omitted — fully redundant with packages[].cves
+            # (was duplicating ~20KB of identical CVE objects, contributing to
+            # provider TPM limit failures on agents with many CVEs)
             "packages":         packages_summary,
             "formatted":        fmt,
         }
     except Exception as exc:
         logger.warning("agent_tools.get_agent_vulnerabilities.failed: %s", exc)
-        return {"error": str(exc)}
         return {"error": str(exc)}
 
 
@@ -1942,49 +1975,76 @@ def get_active_blocks(
                 })
 
             # ── Optional live state check ──────────────────────────────
-            live_ips = set()
+            # Tracked PER-HOST (and per-mechanism for dnsdist), not as one
+            # global set — an IP blocked via Windows Firewall on srv-ad-dns
+            # must not cause a Linux iptables record for the same IP on
+            # srv-sql to be marked "active" when iptables there is empty.
+            live_iptables: Dict[str, set] = {}   # host -> {ips with SENTINEL_BLOCK DROP}
+            live_winfw: Dict[str, set] = {}      # host -> {ips with SentinelAI-Block-* rule}
+            live_dnsdist: set = set()            # ips with dnsdist DropAction (srv-dns-bind)
             live_error = None
+            _WIN_PLAYBOOKS = {"win_block_ip", "win_brute_force_response", "win_lateral_movement_response"}
+            _DNS_EXFIL_PLAYBOOKS = {"block_dns_exfil"}
             if live_check:
                 try:
-                    import requests as _req3
+                    import requests as _req3, re as _re3
                     from ai_agents.config import get_settings as _gs3
                     _s3 = _gs3()
                     _base = f"http://{_s3.ansible_runner_host}:{_s3.ansible_runner_port}"
-                    # Linux: check SENTINEL_BLOCK chain
+                    # Linux: check SENTINEL_BLOCK chain per-host
                     _lin = _req3.post(f"{_base}/adhoc", json={
                         "hosts": "linux_agents", "module": "shell",
                         "args": "iptables -L SENTINEL_BLOCK -n 2>/dev/null | grep DROP || true",
                     }, timeout=60).json()
                     for _host, _r in (_lin.get("hosts") or {}).items():
+                        _ips = set()
                         for _line in _r.get("stdout_lines", []):
-                            import re as _re3
                             _m = _re3.search(r"\b(\d+\.\d+\.\d+\.\d+)\b", _line)
                             if _m:
-                                live_ips.add(_m.group(1))
-                    # Windows: check SentinelAI-Block-* firewall rules
+                                _ips.add(_m.group(1))
+                        live_iptables[_host] = _ips
+                    # Windows: check SentinelAI-Block-* firewall rules per-host
                     _win = _req3.post(f"{_base}/adhoc", json={
                         "hosts": "windows_agents", "module": "win_shell",
                         "args": 'Get-NetFirewallRule -DisplayName "SentinelAI-Block-*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DisplayName',
                     }, timeout=60).json()
                     for _host, _r in (_win.get("hosts") or {}).items():
+                        _ips = set()
                         for _line in _r.get("stdout_lines", []):
-                            import re as _re3b
-                            _m = _re3b.search(r"SentinelAI-Block-(\d+\.\d+\.\d+\.\d+)-(in|out)", _line)
+                            _m = _re3.search(r"SentinelAI-Block-(\d+\.\d+\.\d+\.\d+)-(in|out)", _line)
                             if _m:
-                                live_ips.add(_m.group(1))
-                    # DNS exfil blocks: dnsdist NetmaskGroupRule entries on srv-dns-bind
+                                _ips.add(_m.group(1))
+                        live_winfw[_host] = _ips
+                    # DNS exfil blocks: dnsdist NetmaskGroupRule entries on srv-dns-bind only
                     _dns = _req3.post(f"{_base}/adhoc", json={
                         "hosts": "srv-dns-bind", "module": "shell",
                         "args": "grep -oP 'addMask\\(\"[0-9.]+/' /etc/dnsdist/dnsdist.conf 2>/dev/null || true",
                     }, timeout=60).json()
                     for _host, _r in (_dns.get("hosts") or {}).items():
                         for _line in _r.get("stdout_lines", []):
-                            import re as _re3c
-                            _m = _re3c.search(r"(\d+\.\d+\.\d+\.\d+)", _line)
+                            _m = _re3.search(r"(\d+\.\d+\.\d+\.\d+)", _line)
                             if _m:
-                                live_ips.add(_m.group(1))
+                                live_dnsdist.add(_m.group(1))
                 except Exception as _live_exc:
                     live_error = str(_live_exc)
+
+            def _is_live(b: Dict[str, Any]) -> Optional[bool]:
+                """Determine still_active for a single block record by
+                checking the mechanism+host that actually corresponds to
+                its playbook, never a global cross-host IP set."""
+                ip = b.get("blocked_ip", "")
+                target = (b.get("target_agent") or "")
+                pb = b.get("playbook", "")
+                if "sentinel-fw" in target.lower():
+                    return None  # pfSense not Ansible-manageable
+                if pb in _DNS_EXFIL_PLAYBOOKS:
+                    return ip in live_dnsdist
+                if pb in _WIN_PLAYBOOKS:
+                    return ip in live_winfw.get(target, set())
+                # Default: Linux iptables-based playbooks (block_ip,
+                # brute_force_response, lateral_movement_response,
+                # mysql_credential_response)
+                return ip in live_iptables.get(target, set())
 
             if source_ip:
                 is_blocked = any(b["blocked_ip"] == source_ip for b in blocks)
@@ -1995,7 +2055,8 @@ def get_active_blocks(
                     "blocks": blocks,
                 }
                 if live_check:
-                    result_ip["currently_active_live"] = source_ip in live_ips
+                    _all_live_ips = set().union(live_dnsdist, *live_iptables.values(), *live_winfw.values())
+                    result_ip["currently_active_live"] = source_ip in _all_live_ips
                     if live_error:
                         result_ip["live_check_error"] = live_error
                 return result_ip
@@ -2004,10 +2065,7 @@ def get_active_blocks(
 
             if live_check:
                 for b in valid_blocks:
-                    if "sentinel-fw" in (b.get("target_agent") or "").lower():
-                        b["still_active"] = None  # pfSense not Ansible-manageable
-                    else:
-                        b["still_active"] = b["blocked_ip"] in live_ips
+                    b["still_active"] = _is_live(b)
                 _active = [b for b in valid_blocks if b["still_active"] is True]
                 _stale  = [b for b in valid_blocks if b["still_active"] is False]
                 _unverifiable = [b for b in valid_blocks if b["still_active"] is None]
@@ -2132,9 +2190,9 @@ def get_sca_results(
                 "id":          c.get("id"),
                 "title":       c.get("title"),
                 "result":      c.get("result"),
-                "description": (c.get("description") or "")[:200],
-                "remediation": (c.get("remediation") or "")[:200],
-                "rationale":   (c.get("rationale") or "")[:150],
+                "description": (c.get("description") or "")[:100],
+                "remediation": (c.get("remediation") or "")[:100],
+                "rationale":   (c.get("rationale") or "")[:80],
             })
 
         p_name = policies[0].get("name","—")
